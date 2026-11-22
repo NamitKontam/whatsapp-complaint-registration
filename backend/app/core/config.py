@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     # Database configuration
     database_url: str | None = None
+    migration_database_url: str | None = None
 
     # WhatsApp Cloud API configuration
     whatsapp_access_token: str | None = None
