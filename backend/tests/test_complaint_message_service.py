@@ -1,98 +1,121 @@
 
-from app.db.session import SessionLocal
-from app.models.complaint_message import ComplaintMessage, MessageType
+import pytest
+
+from app.models.complaint_message import (
+    ComplaintMessage,
+    MessageType,
+)
 from app.services.complaint_message_service import save_complaint_message
 from app.services.complaint_service import get_or_create_active_complaint
 from app.services.user_service import get_or_create_user
-from sqlalchemy import select
 
 
-def main():
-    with SessionLocal() as db:
-        try:
-            user = get_or_create_user(
-                db,
-                "919876543210",
-            )
-
-            complaint = get_or_create_active_complaint(
-                db,
-                user.id,
-            )
-
-            db.commit()
-
-            # First incoming WhatsApp message.
-            first_message = save_complaint_message(
-                db=db,
-                complaint_id=complaint.id,
-                whatsapp_message_id="wamid.test001",
-                message_type=MessageType.TEXT,
-                text_content="There is water leakage near my house.",
-            )
-
-            db.commit()
-
-            first_message_id = first_message.id
-
-            print("First message:")
-            print("Message ID:", first_message_id)
-            print("Content:", first_message.text_content)
-            print("Type:", first_message.message_type.value)
-
-            # Simulate receiving the same webhook again.
-            duplicate_message = save_complaint_message(
-                db=db,
-                complaint_id=complaint.id,
-                whatsapp_message_id="wamid.test001",
-                message_type=MessageType.TEXT,
-                text_content="There is water leakage near my house.",
-            )
-
-            print("\nDuplicate webhook:")
-            print("Message ID:", duplicate_message.id)
-
-            print(
-                "Same message:",
-                first_message_id == duplicate_message.id,
-            )
-
-            # Save a second, distinct message.
-            second_message = save_complaint_message(
-                db=db,
-                complaint_id=complaint.id,
-                whatsapp_message_id="wamid.test002",
-                message_type=MessageType.TEXT,
-                text_content="It has been happening since yesterday.",
-            )
-
-            db.commit()
-
-            print("\nSecond message:")
-            print("Message ID:", second_message.id)
-            print("Content:", second_message.text_content)
-
-            saved_messages = db.scalars(
-                select(ComplaintMessage).where(
-                    ComplaintMessage.complaint_id == complaint.id
-                )
-            ).all()
-
-            print("\nMessages belonging to this complaint:")
-
-            for message in saved_messages:
-                print(
-                    message.whatsapp_message_id,
-                    "->",
-                    message.text_content,
-                )
-
-            print("Total messages:", len(saved_messages))
-
-        except Exception:
-            db.rollback()
-            raise
+def create_test_complaint(db_session, phone_number="919876543210"):
+    user = get_or_create_user(db_session, phone_number)
+    return get_or_create_active_complaint(db_session, user.id)
 
 
-if __name__ == "__main__":
-    main()
+def test_save_text_message(db_session):
+    complaint = create_test_complaint(db_session)
+
+    message = save_complaint_message(
+        db=db_session,
+        complaint_id=complaint.id,
+        whatsapp_message_id="wamid.test001",
+        message_type=MessageType.TEXT,
+        text_content="There is no water supply in our area.",
+    )
+
+    assert message.id is not None
+    assert message.complaint_id == complaint.id
+    assert message.whatsapp_message_id == "wamid.test001"
+    assert message.message_type == MessageType.TEXT
+    assert message.text_content == "There is no water supply in our area."
+
+
+def test_duplicate_whatsapp_message_is_not_saved_twice(db_session):
+    complaint = create_test_complaint(db_session)
+
+    first_message = save_complaint_message(
+        db=db_session,
+        complaint_id=complaint.id,
+        whatsapp_message_id="wamid.duplicate001",
+        message_type=MessageType.TEXT,
+        text_content="Street light is not working.",
+    )
+
+    second_message = save_complaint_message(
+        db=db_session,
+        complaint_id=complaint.id,
+        whatsapp_message_id="wamid.duplicate001",
+        message_type=MessageType.TEXT,
+        text_content="Street light is not working.",
+    )
+
+    assert first_message.id == second_message.id
+
+    messages = (
+        db_session.query(ComplaintMessage)
+        .filter_by(complaint_id=complaint.id)
+        .all()
+    )
+
+    assert len(messages) == 1
+
+
+def test_multiple_messages_can_belong_to_same_complaint(db_session):
+    complaint = create_test_complaint(db_session)
+
+    first_message = save_complaint_message(
+        db=db_session,
+        complaint_id=complaint.id,
+        whatsapp_message_id="wamid.multiple001",
+        message_type=MessageType.TEXT,
+        text_content="There is garbage on the road.",
+    )
+
+    second_message = save_complaint_message(
+        db=db_session,
+        complaint_id=complaint.id,
+        whatsapp_message_id="wamid.multiple002",
+        message_type=MessageType.TEXT,
+        text_content="It has been there for three days.",
+    )
+
+    assert first_message.id != second_message.id
+
+    messages = (
+        db_session.query(ComplaintMessage)
+        .filter_by(complaint_id=complaint.id)
+        .all()
+    )
+
+    assert len(messages) == 2
+
+
+def test_duplicate_message_id_cannot_be_assigned_to_another_complaint(db_session):
+    first_complaint = create_test_complaint(
+        db_session,
+        "919876543210",
+    )
+    second_complaint = create_test_complaint(
+        db_session,
+        "919876543211",
+    )
+
+    save_complaint_message(
+        db=db_session,
+        complaint_id=first_complaint.id,
+        whatsapp_message_id="wamid.crosscomplaint001",
+        message_type=MessageType.TEXT,
+        text_content="Water leakage near my house.",
+    )
+
+    with pytest.raises(ValueError):
+        save_complaint_message(
+            db=db_session,
+            complaint_id=second_complaint.id,
+            whatsapp_message_id="wamid.crosscomplaint001",
+            message_type=MessageType.TEXT,
+            text_content="A different complaint.",
+        )

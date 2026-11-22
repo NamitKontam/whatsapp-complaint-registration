@@ -1,11 +1,12 @@
 
 from logging.config import fileConfig
 
+from sqlalchemy import create_engine, pool
+
 from alembic import context
 from app import models
 from app.core.config import get_settings
 from app.db.base import Base
-from sqlalchemy import create_engine, pool
 
 config = context.config
 
@@ -17,11 +18,27 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 # Use the dedicated migration database credentials
+# Select the database environment through Alembic's -x argument.
 settings = get_settings()
-database_url = settings.migration_database_url
+
+x_args = context.get_x_argument(as_dictionary=True)
+environment = x_args.get("environment", "development")
+
+if environment == "test":
+    database_url = settings.test_migration_database_url
+    missing_setting = "TEST_MIGRATION_DATABASE_URL"
+
+elif environment == "development":
+    database_url = settings.migration_database_url
+    missing_setting = "MIGRATION_DATABASE_URL"
+
+else:
+    raise ValueError(
+        f"Unsupported database environment: {environment}"
+    )
 
 if not database_url:
-    raise RuntimeError("MIGRATION_DATABASE_URL is not configured")
+    raise RuntimeError(f"{missing_setting} is not configured")
 
 
 def run_migrations_offline() -> None:
