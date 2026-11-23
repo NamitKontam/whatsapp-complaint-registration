@@ -1,5 +1,6 @@
 from decimal import Decimal
 import pytest
+from pydantic import BaseModel
 
 from app.services.whatsapp_payload_service import (
     NormalizedMessage,
@@ -67,6 +68,7 @@ def test_parse_valid_text_message():
 
     msg = parsed.messages[0]
     assert isinstance(msg, NormalizedMessage)
+    assert isinstance(msg, BaseModel)
     assert msg.sender == "919876543210"
     assert msg.whatsapp_message_id == "wamid.text001"
     assert msg.timestamp == "1732345678"
@@ -76,7 +78,9 @@ def test_parse_valid_text_message():
     assert msg.latitude is None
     assert msg.longitude is None
 
-    # Check to_dict() contract
+    # Check Pydantic model_dump() and to_dict() contract
+    dumped = msg.model_dump()
+    assert dumped["sender"] == "919876543210"
     msg_dict = msg.to_dict()
     assert msg_dict["message_type"] == "TEXT"
     assert msg_dict["text_content"] == "There is water leakage near my house."

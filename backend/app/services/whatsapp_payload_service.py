@@ -1,7 +1,8 @@
-from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class NormalizedMessageType(str, Enum):
@@ -26,9 +27,10 @@ class UnsupportedMessageTypeError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class NormalizedMessage:
-    """Strongly typed normalized representation of an incoming WhatsApp message."""
+class NormalizedMessage(BaseModel):
+    """Pydantic model representing a normalized incoming WhatsApp message."""
+
+    model_config = ConfigDict(frozen=True)
 
     sender: str
     whatsapp_message_id: str
@@ -46,14 +48,15 @@ class NormalizedMessage:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the normalized message into a clean dictionary."""
-        data = asdict(self)
+        data = self.model_dump()
         data["message_type"] = self.message_type.value
         return data
 
 
-@dataclass(frozen=True)
-class NormalizedStatus:
-    """Strongly typed representation of an outgoing WhatsApp message delivery status."""
+class NormalizedStatus(BaseModel):
+    """Pydantic model representing an outgoing WhatsApp message delivery status."""
+
+    model_config = ConfigDict(frozen=True)
 
     status: str
     whatsapp_message_id: str
@@ -63,15 +66,16 @@ class NormalizedStatus:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert status event into a dictionary."""
-        return asdict(self)
+        return self.model_dump()
 
 
-@dataclass(frozen=True)
-class ParsedWebhookPayload:
-    """Complete container separating incoming messages from status events."""
+class ParsedWebhookPayload(BaseModel):
+    """Pydantic container separating incoming messages from status events."""
 
-    messages: list[NormalizedMessage]
-    statuses: list[NormalizedStatus]
+    model_config = ConfigDict(frozen=True)
+
+    messages: list[NormalizedMessage] = Field(default_factory=list)
+    statuses: list[NormalizedStatus] = Field(default_factory=list)
 
 
 def _extract_text_details(message_dict: dict[str, Any]) -> dict[str, Any]:
@@ -156,7 +160,7 @@ def extract_single_message(
     message_dict: dict[str, Any],
     raise_on_unsupported: bool = False,
 ) -> NormalizedMessage:
-    """Normalize a single raw WhatsApp message dictionary.
+    """Normalize a single raw WhatsApp message dictionary into a Pydantic NormalizedMessage.
 
     Args:
         message_dict: Dictionary representing a single item in value["messages"].
@@ -164,7 +168,7 @@ def extract_single_message(
             encountering unsupported message types. Defaults to False.
 
     Returns:
-        NormalizedMessage: The normalized message representation.
+        NormalizedMessage: The normalized Pydantic message instance.
 
     Raises:
         PayloadValidationError: If required metadata or payload fields are missing.
@@ -213,18 +217,21 @@ def extract_single_message(
         details = {}
         msg_type = NormalizedMessageType.UNSUPPORTED
 
-    return NormalizedMessage(
-        sender=sender,
-        whatsapp_message_id=whatsapp_message_id,
-        timestamp=timestamp,
-        message_type=msg_type,
-        raw_type=raw_type_str,
-        **details,
-    )
+    try:
+        return NormalizedMessage(
+            sender=sender,
+            whatsapp_message_id=whatsapp_message_id,
+            timestamp=timestamp,
+            message_type=msg_type,
+            raw_type=raw_type_str,
+            **details,
+        )
+    except ValidationError as err:
+        raise PayloadValidationError(f"Pydantic validation error: {err}") from err
 
 
 def extract_single_status(status_dict: dict[str, Any]) -> NormalizedStatus:
-    """Normalize a single status notification dictionary from Meta."""
+    """Normalize a single status notification dictionary from Meta into a Pydantic NormalizedStatus."""
     if not isinstance(status_dict, dict):
         raise PayloadValidationError("Status item must be a dictionary")
 
@@ -239,13 +246,16 @@ def extract_single_status(status_dict: dict[str, Any]) -> NormalizedStatus:
             "Status event missing required fields ('status', 'id', or 'recipient_id')"
         )
 
-    return NormalizedStatus(
-        status=str(status),
-        whatsapp_message_id=str(message_id),
-        recipient_id=str(recipient_id),
-        timestamp=str(timestamp) if timestamp is not None else None,
-        errors=errors if isinstance(errors, list) else None,
-    )
+    try:
+        return NormalizedStatus(
+            status=str(status),
+            whatsapp_message_id=str(message_id),
+            recipient_id=str(recipient_id),
+            timestamp=str(timestamp) if timestamp is not None else None,
+            errors=errors if isinstance(errors, list) else None,
+        )
+    except ValidationError as err:
+        raise PayloadValidationError(f"Pydantic validation error: {err}") from err
 
 
 def parse_webhook_payload(
@@ -259,7 +269,7 @@ def parse_webhook_payload(
         raise_on_unsupported: Whether to raise an exception on unsupported message types.
 
     Returns:
-        ParsedWebhookPayload: Container holding normalized messages and statuses.
+        ParsedWebhookPayload: Pydantic model holding normalized messages and statuses.
 
     Raises:
         PayloadValidationError: If payload is empty, malformed, or missing required structure.
