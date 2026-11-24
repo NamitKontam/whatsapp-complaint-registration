@@ -19,13 +19,11 @@ NormalizedMessage = IncomingWhatsAppMessage
 class PayloadValidationError(ValueError):
     """Raised when an incoming webhook payload is malformed or missing required fields."""
 
-    pass
 
 
 class UnsupportedMessageTypeError(ValueError):
     """Raised when an incoming message type is not supported."""
 
-    pass
 
 
 class NormalizedStatus(BaseModel):
