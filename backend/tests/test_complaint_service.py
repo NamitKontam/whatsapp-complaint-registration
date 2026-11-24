@@ -1,14 +1,19 @@
 
+
 import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
 from app.models.complaint import (
     Complaint,
     ComplaintStatus,
     ConversationState,
 )
-from app.services.complaint_service import get_or_create_active_complaint
+from app.services.complaint_service import (
+    get_or_create_active_complaint,
+    submit_complaint,
+)
 from app.services.user_service import get_or_create_user
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 
 def test_create_new_draft_complaint(db_session):
@@ -67,16 +72,15 @@ def test_database_rejects_second_draft_for_same_user(db_session):
     first_complaint = get_or_create_active_complaint(db_session, user.id)
 
     # Directly attempt to insert another draft, bypassing our service.
-    with pytest.raises(IntegrityError):
-        with db_session.begin_nested():
-            duplicate_complaint = Complaint(
-                user_id=user.id,
-                status=ComplaintStatus.DRAFT,
-                conversation_state=ConversationState.AWAITING_COMPLAINT,
-            )
+    with pytest.raises(IntegrityError), db_session.begin_nested():
+        duplicate_complaint = Complaint(
+            user_id=user.id,
+            status=ComplaintStatus.DRAFT,
+            conversation_state=ConversationState.AWAITING_COMPLAINT,
+        )
 
-            db_session.add(duplicate_complaint)
-            db_session.flush()
+        db_session.add(duplicate_complaint)
+        db_session.flush()
 
     # Verify that only the original draft exists.
     drafts = db_session.scalars(
@@ -88,3 +92,28 @@ def test_database_rejects_second_draft_for_same_user(db_session):
 
     assert len(drafts) == 1
     assert drafts[0].id == first_complaint.id
+
+def test_submit_draft_complaint(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+
+    submitted_complaint = submit_complaint(db_session, complaint)
+
+    assert submitted_complaint.complaint_number.startswith("CMP-")
+    assert submitted_complaint.status == ComplaintStatus.SUBMITTED
+    assert submitted_complaint.conversation_state == ConversationState.COMPLETED
+    assert submitted_complaint.completed_at is not None
+    assert submitted_complaint.completed_at.tzinfo is not None
+
+
+def test_cannot_submit_already_submitted_complaint(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+
+    submit_complaint(db_session, complaint)
+    original_reference = complaint.complaint_number
+
+    with pytest.raises(ValueError, match="Only draft complaints can be submitted"):
+        submit_complaint(db_session, complaint)
+
+    assert complaint.complaint_number == original_reference

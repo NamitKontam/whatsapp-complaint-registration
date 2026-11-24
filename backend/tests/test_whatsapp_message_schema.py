@@ -3,13 +3,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
+
 from app.schemas.whatsapp_message import (
     IncomingWhatsAppMessage,
     InteractiveReply,
     InteractiveReplyType,
     MessageKind,
 )
-from pydantic import ValidationError
 
 
 @pytest.fixture
@@ -41,7 +42,11 @@ def test_valid_media_message(base_message, message_type):
         **base_message,
         message_type=message_type,
         media_id="media123",
-        mime_type="image/jpeg" if message_type == MessageKind.IMAGE else "audio/ogg",
+        media_mime_type=(
+            "image/jpeg"
+            if message_type == MessageKind.IMAGE
+            else "audio/ogg"
+        ),
     )
 
     assert message.media_id == "media123"
