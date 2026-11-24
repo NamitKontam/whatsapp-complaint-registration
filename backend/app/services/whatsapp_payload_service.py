@@ -12,6 +12,7 @@ class NormalizedMessageType(str, Enum):
     IMAGE = "IMAGE"
     AUDIO = "AUDIO"
     LOCATION = "LOCATION"
+    INTERACTIVE = "INTERACTIVE"
     UNSUPPORTED = "UNSUPPORTED"
 
 
@@ -101,10 +102,13 @@ def _extract_image_details(message_dict: dict[str, Any]) -> dict[str, Any]:
     if not media_id:
         raise PayloadValidationError("Image message missing media 'id'")
 
+    caption = image_obj.get("caption")
+
     return {
         "media_id": str(media_id),
         "media_mime_type": image_obj.get("mime_type"),
-        "caption": image_obj.get("caption"),
+        "caption": caption,
+        "text_content": caption,
     }
 
 
@@ -148,12 +152,55 @@ def _extract_location_details(message_dict: dict[str, Any]) -> dict[str, Any]:
             f"Invalid numeric coordinate in location: {err}"
         ) from err
 
+    name = loc_obj.get("name")
+    address = loc_obj.get("address")
+    formatted_location = None
+    if name or address:
+        formatted_location = ", ".join(filter(None, [name, address]))
+
     return {
         "latitude": latitude,
         "longitude": longitude,
-        "location_name": loc_obj.get("name"),
-        "location_address": loc_obj.get("address"),
+        "location_name": name,
+        "location_address": address,
+        "text_content": formatted_location,
     }
+
+
+def _extract_interactive_details(message_dict: dict[str, Any]) -> dict[str, Any]:
+    """Extract and validate interactive button or list reply."""
+    interactive_obj = message_dict.get("interactive")
+    if not isinstance(interactive_obj, dict):
+        raise PayloadValidationError(
+            "Interactive message payload missing 'interactive' object"
+        )
+
+    button_reply = interactive_obj.get("button_reply")
+    if isinstance(button_reply, dict):
+        title = button_reply.get("title") or button_reply.get("id")
+        if title is not None:
+            return {"text_content": str(title)}
+
+    list_reply = interactive_obj.get("list_reply")
+    if isinstance(list_reply, dict):
+        title = list_reply.get("title") or list_reply.get("id")
+        if title is not None:
+            return {"text_content": str(title)}
+
+    raise PayloadValidationError("Interactive message missing supported reply content")
+
+
+def _extract_button_details(message_dict: dict[str, Any]) -> dict[str, Any]:
+    """Extract and validate quick reply button click."""
+    button_obj = message_dict.get("button")
+    if not isinstance(button_obj, dict):
+        raise PayloadValidationError("Button message payload missing 'button' object")
+
+    text = button_obj.get("text") or button_obj.get("payload")
+    if text is None:
+        raise PayloadValidationError("Button message payload missing text or payload")
+
+    return {"text_content": str(text)}
 
 
 def extract_single_message(
@@ -209,6 +256,12 @@ def extract_single_message(
     elif raw_type_str == "location":
         details = _extract_location_details(message_dict)
         msg_type = NormalizedMessageType.LOCATION
+    elif raw_type_str == "interactive":
+        details = _extract_interactive_details(message_dict)
+        msg_type = NormalizedMessageType.INTERACTIVE
+    elif raw_type_str == "button":
+        details = _extract_button_details(message_dict)
+        msg_type = NormalizedMessageType.INTERACTIVE
     else:
         if raise_on_unsupported:
             raise UnsupportedMessageTypeError(

@@ -113,6 +113,7 @@ def test_parse_valid_image_with_caption():
     assert msg.media_id == "media_img_999"
     assert msg.media_mime_type == "image/jpeg"
     assert msg.caption == "Photo of broken pipe"
+    assert msg.text_content == "Photo of broken pipe"
 
 
 def test_parse_valid_image_without_caption():
@@ -217,10 +218,86 @@ def test_parse_valid_location_message():
     assert msg.longitude == Decimal("77.5946")
     assert msg.location_name == "Town Hall"
     assert msg.location_address == "MG Road, Bengaluru"
+    assert msg.text_content == "Town Hall, MG Road, Bengaluru"
 
 
 # ==========================================
-# 5. Missing Optional Fields
+# 5. Interactive & Button Reply Tests
+# ==========================================
+
+
+def test_parse_valid_interactive_button_reply():
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.btn001",
+        "timestamp": "1732345684",
+        "type": "interactive",
+        "interactive": {
+            "type": "button_reply",
+            "button_reply": {
+                "id": "btn_yes",
+                "title": "Yes",
+            },
+        },
+    }
+    payload = _build_meta_payload(messages=[raw_message])
+
+    parsed = parse_webhook_payload(payload)
+    assert len(parsed.messages) == 1
+    msg = parsed.messages[0]
+
+    assert msg.message_type == NormalizedMessageType.INTERACTIVE
+    assert msg.text_content == "Yes"
+    assert msg.raw_type == "interactive"
+
+
+def test_parse_valid_interactive_list_reply():
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.list001",
+        "timestamp": "1732345685",
+        "type": "interactive",
+        "interactive": {
+            "type": "list_reply",
+            "list_reply": {
+                "id": "option_water",
+                "title": "Water Leakage",
+            },
+        },
+    }
+    payload = _build_meta_payload(messages=[raw_message])
+
+    parsed = parse_webhook_payload(payload)
+    assert len(parsed.messages) == 1
+    msg = parsed.messages[0]
+
+    assert msg.message_type == NormalizedMessageType.INTERACTIVE
+    assert msg.text_content == "Water Leakage"
+
+
+def test_parse_valid_quick_reply_button():
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.qr001",
+        "timestamp": "1732345686",
+        "type": "button",
+        "button": {
+            "text": "No",
+            "payload": "no",
+        },
+    }
+    payload = _build_meta_payload(messages=[raw_message])
+
+    parsed = parse_webhook_payload(payload)
+    assert len(parsed.messages) == 1
+    msg = parsed.messages[0]
+
+    assert msg.message_type == NormalizedMessageType.INTERACTIVE
+    assert msg.text_content == "No"
+
+
+# ==========================================
+# 6. Missing Optional Fields
 # ==========================================
 
 
