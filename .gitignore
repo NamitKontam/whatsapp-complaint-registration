@@ -39,3 +39,5 @@ Thumbs.db
 # Database backups
 *.dump
 *.sql
+
+commit_log.csv
