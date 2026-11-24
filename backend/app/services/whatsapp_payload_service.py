@@ -1,19 +1,19 @@
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.schemas.whatsapp_message import (
+    IncomingWhatsAppMessage,
+    InteractiveReply,
+    InteractiveReplyType,
+    MessageKind,
+)
 
-class NormalizedMessageType(str, Enum):
-    """Supported normalized incoming WhatsApp message types."""
-
-    TEXT = "TEXT"
-    IMAGE = "IMAGE"
-    AUDIO = "AUDIO"
-    LOCATION = "LOCATION"
-    INTERACTIVE = "INTERACTIVE"
-    UNSUPPORTED = "UNSUPPORTED"
+# Backward-compatibility aliases
+NormalizedMessageType = MessageKind
+NormalizedMessage = IncomingWhatsAppMessage
 
 
 class PayloadValidationError(ValueError):
@@ -26,32 +26,6 @@ class UnsupportedMessageTypeError(ValueError):
     """Raised when an incoming message type is not supported."""
 
     pass
-
-
-class NormalizedMessage(BaseModel):
-    """Pydantic model representing a normalized incoming WhatsApp message."""
-
-    model_config = ConfigDict(frozen=True)
-
-    sender: str
-    whatsapp_message_id: str
-    timestamp: str
-    message_type: NormalizedMessageType
-    text_content: str | None = None
-    media_id: str | None = None
-    media_mime_type: str | None = None
-    caption: str | None = None
-    latitude: Decimal | None = None
-    longitude: Decimal | None = None
-    location_name: str | None = None
-    location_address: str | None = None
-    raw_type: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert the normalized message into a clean dictionary."""
-        data = self.model_dump()
-        data["message_type"] = self.message_type.value
-        return data
 
 
 class NormalizedStatus(BaseModel):
@@ -75,8 +49,41 @@ class ParsedWebhookPayload(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    messages: list[NormalizedMessage] = Field(default_factory=list)
+    messages: list[IncomingWhatsAppMessage] = Field(default_factory=list)
     statuses: list[NormalizedStatus] = Field(default_factory=list)
+
+
+def _parse_timestamp(timestamp_val: Any) -> datetime:
+    """Parse a timestamp into a timezone-aware datetime normalized to UTC."""
+    if isinstance(timestamp_val, datetime):
+        if timestamp_val.tzinfo is None:
+            raise PayloadValidationError("Timestamp must be timezone-aware")
+        return timestamp_val.astimezone(UTC)
+
+    if isinstance(timestamp_val, (int, float)):
+        try:
+            return datetime.fromtimestamp(timestamp_val, tz=UTC)
+        except (OverflowError, OSError, ValueError) as err:
+            raise PayloadValidationError(f"Invalid timestamp value: {err}") from err
+
+    if isinstance(timestamp_val, str):
+        # First try numeric unix timestamp (string of digits/float)
+        try:
+            ts_float = float(timestamp_val)
+            return datetime.fromtimestamp(ts_float, tz=UTC)
+        except ValueError:
+            # Fallback to ISO format string
+            try:
+                dt = datetime.fromisoformat(timestamp_val)
+            except Exception as err:
+                raise PayloadValidationError(
+                    f"Invalid ISO timestamp format: {timestamp_val}"
+                ) from err
+            if dt.tzinfo is None:
+                raise PayloadValidationError("Timestamp must be timezone-aware")
+            return dt.astimezone(UTC)
+
+    raise PayloadValidationError(f"Unsupported timestamp type: {type(timestamp_val)}")
 
 
 def _extract_text_details(message_dict: dict[str, Any]) -> dict[str, Any]:
@@ -86,7 +93,7 @@ def _extract_text_details(message_dict: dict[str, Any]) -> dict[str, Any]:
         raise PayloadValidationError("Text message payload missing 'text' object")
 
     body = text_obj.get("body")
-    if body is None:
+    if body is None or not str(body).strip():
         raise PayloadValidationError("Text message payload missing 'body'")
 
     return {"text_content": str(body)}
@@ -102,13 +109,10 @@ def _extract_image_details(message_dict: dict[str, Any]) -> dict[str, Any]:
     if not media_id:
         raise PayloadValidationError("Image message missing media 'id'")
 
-    caption = image_obj.get("caption")
-
     return {
         "media_id": str(media_id),
         "media_mime_type": image_obj.get("mime_type"),
-        "caption": caption,
-        "text_content": caption,
+        "caption": image_obj.get("caption"),
     }
 
 
@@ -152,18 +156,11 @@ def _extract_location_details(message_dict: dict[str, Any]) -> dict[str, Any]:
             f"Invalid numeric coordinate in location: {err}"
         ) from err
 
-    name = loc_obj.get("name")
-    address = loc_obj.get("address")
-    formatted_location = None
-    if name or address:
-        formatted_location = ", ".join(filter(None, [name, address]))
-
     return {
         "latitude": latitude,
         "longitude": longitude,
-        "location_name": name,
-        "location_address": address,
-        "text_content": formatted_location,
+        "location_name": loc_obj.get("name"),
+        "location_address": loc_obj.get("address"),
     }
 
 
@@ -177,15 +174,31 @@ def _extract_interactive_details(message_dict: dict[str, Any]) -> dict[str, Any]
 
     button_reply = interactive_obj.get("button_reply")
     if isinstance(button_reply, dict):
-        title = button_reply.get("title") or button_reply.get("id")
-        if title is not None:
-            return {"text_content": str(title)}
+        reply_id = button_reply.get("id")
+        title = button_reply.get("title")
+        if not reply_id or not title:
+            raise PayloadValidationError("Interactive button reply missing id or title")
+        return {
+            "interactive_reply": InteractiveReply(
+                reply_type=InteractiveReplyType.BUTTON,
+                reply_id=str(reply_id),
+                title=str(title),
+            )
+        }
 
     list_reply = interactive_obj.get("list_reply")
     if isinstance(list_reply, dict):
-        title = list_reply.get("title") or list_reply.get("id")
-        if title is not None:
-            return {"text_content": str(title)}
+        reply_id = list_reply.get("id")
+        title = list_reply.get("title")
+        if not reply_id or not title:
+            raise PayloadValidationError("Interactive list reply missing id or title")
+        return {
+            "interactive_reply": InteractiveReply(
+                reply_type=InteractiveReplyType.LIST,
+                reply_id=str(reply_id),
+                title=str(title),
+            )
+        }
 
     raise PayloadValidationError("Interactive message missing supported reply content")
 
@@ -196,18 +209,25 @@ def _extract_button_details(message_dict: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(button_obj, dict):
         raise PayloadValidationError("Button message payload missing 'button' object")
 
-    text = button_obj.get("text") or button_obj.get("payload")
-    if text is None:
-        raise PayloadValidationError("Button message payload missing text or payload")
+    reply_id = button_obj.get("payload") or button_obj.get("text")
+    title = button_obj.get("text") or button_obj.get("payload")
+    if not reply_id or not title:
+        raise PayloadValidationError("Button message missing text or payload")
 
-    return {"text_content": str(text)}
+    return {
+        "interactive_reply": InteractiveReply(
+            reply_type=InteractiveReplyType.BUTTON,
+            reply_id=str(reply_id),
+            title=str(title),
+        )
+    }
 
 
 def extract_single_message(
     message_dict: dict[str, Any],
     raise_on_unsupported: bool = False,
-) -> NormalizedMessage:
-    """Normalize a single raw WhatsApp message dictionary into a Pydantic NormalizedMessage.
+) -> IncomingWhatsAppMessage:
+    """Normalize a single raw WhatsApp message dictionary into an IncomingWhatsAppMessage.
 
     Args:
         message_dict: Dictionary representing a single item in value["messages"].
@@ -215,10 +235,10 @@ def extract_single_message(
             encountering unsupported message types. Defaults to False.
 
     Returns:
-        NormalizedMessage: The normalized Pydantic message instance.
+        IncomingWhatsAppMessage: The validated Pydantic message instance.
 
     Raises:
-        PayloadValidationError: If required metadata or payload fields are missing.
+        PayloadValidationError: If required metadata or payload fields are missing or invalid.
         UnsupportedMessageTypeError: If the message type is unsupported and
             raise_on_unsupported is True.
     """
@@ -227,59 +247,59 @@ def extract_single_message(
 
     sender = message_dict.get("from")
     whatsapp_message_id = message_dict.get("id")
-    timestamp = message_dict.get("timestamp")
+    raw_timestamp = message_dict.get("timestamp")
     raw_type = message_dict.get("type")
 
     if not sender:
         raise PayloadValidationError("Message missing required 'from' field")
     if not whatsapp_message_id:
         raise PayloadValidationError("Message missing required 'id' field")
-    if not timestamp:
+    if raw_timestamp is None or raw_timestamp == "":
         raise PayloadValidationError("Message missing required 'timestamp' field")
     if not raw_type:
         raise PayloadValidationError("Message missing required 'type' field")
 
-    sender = str(sender)
+    whatsapp_number = str(sender)
     whatsapp_message_id = str(whatsapp_message_id)
-    timestamp = str(timestamp)
+    timestamp = _parse_timestamp(raw_timestamp)
     raw_type_str = str(raw_type).lower()
 
     if raw_type_str == "text":
         details = _extract_text_details(message_dict)
-        msg_type = NormalizedMessageType.TEXT
+        msg_kind = MessageKind.TEXT
     elif raw_type_str == "image":
         details = _extract_image_details(message_dict)
-        msg_type = NormalizedMessageType.IMAGE
+        msg_kind = MessageKind.IMAGE
     elif raw_type_str in ("audio", "voice"):
         details = _extract_audio_details(message_dict)
-        msg_type = NormalizedMessageType.AUDIO
+        msg_kind = MessageKind.AUDIO
     elif raw_type_str == "location":
         details = _extract_location_details(message_dict)
-        msg_type = NormalizedMessageType.LOCATION
+        msg_kind = MessageKind.LOCATION
     elif raw_type_str == "interactive":
         details = _extract_interactive_details(message_dict)
-        msg_type = NormalizedMessageType.INTERACTIVE
+        msg_kind = MessageKind.INTERACTIVE
     elif raw_type_str == "button":
         details = _extract_button_details(message_dict)
-        msg_type = NormalizedMessageType.INTERACTIVE
+        msg_kind = MessageKind.INTERACTIVE
     else:
         if raise_on_unsupported:
             raise UnsupportedMessageTypeError(
                 f"Unsupported WhatsApp message type: {raw_type}"
             )
         details = {}
-        msg_type = NormalizedMessageType.UNSUPPORTED
+        msg_kind = MessageKind.UNSUPPORTED
 
     try:
-        return NormalizedMessage(
-            sender=sender,
+        return IncomingWhatsAppMessage(
+            whatsapp_number=whatsapp_number,
             whatsapp_message_id=whatsapp_message_id,
             timestamp=timestamp,
-            message_type=msg_type,
+            message_type=msg_kind,
             raw_type=raw_type_str,
             **details,
         )
-    except ValidationError as err:
+    except (ValidationError, ValueError) as err:
         raise PayloadValidationError(f"Pydantic validation error: {err}") from err
 
 
@@ -322,7 +342,7 @@ def parse_webhook_payload(
         raise_on_unsupported: Whether to raise an exception on unsupported message types.
 
     Returns:
-        ParsedWebhookPayload: Pydantic model holding normalized messages and statuses.
+        ParsedWebhookPayload: Pydantic model holding validated messages and statuses.
 
     Raises:
         PayloadValidationError: If payload is empty, malformed, or missing required structure.
@@ -334,7 +354,7 @@ def parse_webhook_payload(
     if entries is None or not isinstance(entries, list):
         raise PayloadValidationError("Payload missing required 'entry' list")
 
-    messages: list[NormalizedMessage] = []
+    messages: list[IncomingWhatsAppMessage] = []
     statuses: list[NormalizedStatus] = []
 
     for entry in entries:
@@ -381,7 +401,7 @@ def extract_messages(
     payload: dict[str, Any],
     raise_on_unsupported: bool = False,
     include_unsupported: bool = True,
-) -> list[NormalizedMessage]:
+) -> list[IncomingWhatsAppMessage]:
     """Convenience function returning only normalized incoming messages.
 
     Status notifications are automatically filtered out.
@@ -392,7 +412,7 @@ def extract_messages(
         include_unsupported: If False, omits messages categorized as UNSUPPORTED.
 
     Returns:
-        list[NormalizedMessage]: Extracted incoming messages.
+        list[IncomingWhatsAppMessage]: Extracted incoming messages.
     """
     parsed = parse_webhook_payload(
         payload=payload,
@@ -403,5 +423,5 @@ def extract_messages(
         return parsed.messages
 
     return [
-        m for m in parsed.messages if m.message_type != NormalizedMessageType.UNSUPPORTED
+        m for m in parsed.messages if m.message_type != MessageKind.UNSUPPORTED
     ]
