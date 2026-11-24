@@ -2,8 +2,13 @@
 import pytest
 
 from app.models.complaint import ConversationState
+from app.schemas.whatsapp_message import (
+    InteractiveReply,
+    InteractiveReplyType,
+)
 from app.services.conversation_service import (
     ConversationEvent,
+    classify_interactive_reply,
     classify_reply,
     get_next_conversation_state,
 )
@@ -72,3 +77,20 @@ def test_invalid_transition_raises_error():
             ConversationState.AWAITING_COMPLAINT,
             ConversationEvent.NO,
         )
+
+@pytest.mark.parametrize(
+    ("reply_id", "expected_event"),
+    [
+        ("complaint_yes", ConversationEvent.YES),
+        ("complaint_no", ConversationEvent.NO),
+        ("unknown_option", ConversationEvent.MESSAGE_RECEIVED),
+    ],
+)
+def test_classify_interactive_reply(reply_id, expected_event):
+    reply = InteractiveReply(
+        reply_type=InteractiveReplyType.BUTTON,
+        reply_id=reply_id,
+        title="Some visible title",
+    )
+
+    assert classify_interactive_reply(reply) == expected_event

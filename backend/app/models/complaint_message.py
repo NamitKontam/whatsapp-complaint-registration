@@ -4,7 +4,6 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from app.db.base import Base
 from sqlalchemy import (
     DateTime,
     ForeignKey,
@@ -18,6 +17,8 @@ from sqlalchemy import (
     Enum as SQLAlchemyEnum,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
 
 
 class MessageType(str, Enum):
@@ -83,6 +84,43 @@ class ComplaintMessage(Base):
         Numeric(10, 7),
         nullable=True,
     )
+
+
+    caption: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    location_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    location_address: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    interactive_reply_type: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    interactive_reply_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    interactive_reply_title: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    raw_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

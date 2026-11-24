@@ -1,18 +1,20 @@
 
+import uuid
 from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session
 
 from app.models.complaint_message import (
     ComplaintMessage,
     MessageType,
 )
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
 
 
 def save_complaint_message(
     db: Session,
-    complaint_id,
+    complaint_id: uuid.UUID,
     whatsapp_message_id: str,
     message_type: MessageType,
     text_content: str | None = None,
@@ -21,7 +23,14 @@ def save_complaint_message(
     media_storage_key: str | None = None,
     latitude: Decimal | None = None,
     longitude: Decimal | None = None,
-) -> ComplaintMessage:
+    caption: str | None = None,
+    location_name: str | None = None,
+    location_address: str | None = None,
+    interactive_reply_type: str | None = None,
+    interactive_reply_id: str | None = None,
+    interactive_reply_title: str | None = None,
+    raw_type: str | None = None,
+) -> tuple[ComplaintMessage, bool]:
     """Save an incoming WhatsApp message against a complaint."""
 
     statement = (
@@ -36,6 +45,13 @@ def save_complaint_message(
             media_storage_key=media_storage_key,
             latitude=latitude,
             longitude=longitude,
+            caption=caption,
+            location_name=location_name,
+            location_address=location_address,
+            interactive_reply_type=interactive_reply_type,
+            interactive_reply_id=interactive_reply_id,
+            interactive_reply_title=interactive_reply_title,
+            raw_type=raw_type,
         )
         .on_conflict_do_nothing(
             index_elements=[ComplaintMessage.whatsapp_message_id]
@@ -46,7 +62,7 @@ def save_complaint_message(
     message = db.scalars(statement).one_or_none()
 
     if message is not None:
-        return message
+        return message, True
 
     # This WhatsApp message was already processed.
     existing_message = db.scalar(
@@ -66,4 +82,4 @@ def save_complaint_message(
             "WhatsApp message is already associated with another complaint"
         )
 
-    return existing_message
+    return existing_message, False
