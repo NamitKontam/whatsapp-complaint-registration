@@ -705,3 +705,33 @@ def test_test_parser_endpoint_integration():
     assert result.messages[0].text_content == "Testing endpoint"
 
 
+@pytest.mark.parametrize(
+    "sample_type,expected_kind",
+    [
+        ("text", MessageKind.TEXT),
+        ("image", MessageKind.IMAGE),
+        ("audio", MessageKind.AUDIO),
+        ("location", MessageKind.LOCATION),
+        ("interactive", MessageKind.INTERACTIVE),
+    ],
+)
+def test_sample_payloads_parse_successfully(sample_type, expected_kind):
+    from app.api.routes.webhooks import get_sample_payload
+
+    payload = get_sample_payload(sample_type)
+    parsed = parse_webhook_payload(payload)
+    assert len(parsed.messages) == 1
+    assert parsed.messages[0].message_type == expected_kind
+
+
+def test_status_sample_payload_parses_successfully():
+    from app.api.routes.webhooks import get_sample_payload
+
+    payload = get_sample_payload("status")
+    parsed = parse_webhook_payload(payload)
+    assert len(parsed.messages) == 0
+    assert len(parsed.statuses) == 1
+    assert parsed.statuses[0].status == "delivered"
+
+
+
