@@ -1,10 +1,15 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 import pytest
 from pydantic import BaseModel
 
+from app.schemas.whatsapp_message import (
+    IncomingWhatsAppMessage,
+    InteractiveReply,
+    InteractiveReplyType,
+    MessageKind,
+)
 from app.services.whatsapp_payload_service import (
-    NormalizedMessage,
-    NormalizedMessageType,
     NormalizedStatus,
     ParsedWebhookPayload,
     PayloadValidationError,
@@ -67,27 +72,29 @@ def test_parse_valid_text_message():
     assert len(parsed.statuses) == 0
 
     msg = parsed.messages[0]
-    assert isinstance(msg, NormalizedMessage)
+    assert isinstance(msg, IncomingWhatsAppMessage)
     assert isinstance(msg, BaseModel)
-    assert msg.sender == "919876543210"
+    assert msg.whatsapp_number == "919876543210"
     assert msg.whatsapp_message_id == "wamid.text001"
-    assert msg.timestamp == "1732345678"
-    assert msg.message_type == NormalizedMessageType.TEXT
+    assert msg.message_type == MessageKind.TEXT
     assert msg.text_content == "There is water leakage near my house."
+    assert msg.timestamp == datetime.fromtimestamp(1732345678, tz=UTC)
+    assert msg.timestamp.tzinfo == UTC
     assert msg.media_id is None
     assert msg.latitude is None
     assert msg.longitude is None
+    assert msg.interactive_reply is None
 
     # Check Pydantic model_dump() and to_dict() contract
     dumped = msg.model_dump()
-    assert dumped["sender"] == "919876543210"
+    assert dumped["whatsapp_number"] == "919876543210"
     msg_dict = msg.to_dict()
     assert msg_dict["message_type"] == "TEXT"
     assert msg_dict["text_content"] == "There is water leakage near my house."
 
 
 # ==========================================
-# 2. Valid Image Message Tests
+# 2. Valid Image Message Tests (With Caption)
 # ==========================================
 
 
@@ -98,9 +105,9 @@ def test_parse_valid_image_with_caption():
         "timestamp": "1732345679",
         "type": "image",
         "image": {
-            "id": "media_img_999",
+            "id": "media_img_12345",
             "mime_type": "image/jpeg",
-            "caption": "Photo of broken pipe",
+            "caption": "Pothole photo for evidence",
         },
     }
     payload = _build_meta_payload(messages=[raw_message])
@@ -109,11 +116,17 @@ def test_parse_valid_image_with_caption():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.IMAGE
-    assert msg.media_id == "media_img_999"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.IMAGE
+    assert msg.media_id == "media_img_12345"
     assert msg.media_mime_type == "image/jpeg"
-    assert msg.caption == "Photo of broken pipe"
-    assert msg.text_content == "Photo of broken pipe"
+    assert msg.caption == "Pothole photo for evidence"
+    assert msg.text_content is None
+
+
+# ==========================================
+# 3. Valid Image Message Tests (Without Caption)
+# ==========================================
 
 
 def test_parse_valid_image_without_caption():
@@ -123,7 +136,7 @@ def test_parse_valid_image_without_caption():
         "timestamp": "1732345680",
         "type": "image",
         "image": {
-            "id": "media_img_888",
+            "id": "media_img_67890",
             "mime_type": "image/png",
         },
     }
@@ -133,14 +146,16 @@ def test_parse_valid_image_without_caption():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.IMAGE
-    assert msg.media_id == "media_img_888"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.IMAGE
+    assert msg.media_id == "media_img_67890"
     assert msg.media_mime_type == "image/png"
     assert msg.caption is None
+    assert msg.text_content is None
 
 
 # ==========================================
-# 3. Valid Audio Message Tests
+# 4. Valid Audio & Voice Message Tests
 # ==========================================
 
 
@@ -151,7 +166,7 @@ def test_parse_valid_audio_message():
         "timestamp": "1732345681",
         "type": "audio",
         "audio": {
-            "id": "media_audio_777",
+            "id": "media_audio_999",
             "mime_type": "audio/ogg; codecs=opus",
         },
     }
@@ -161,20 +176,20 @@ def test_parse_valid_audio_message():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.AUDIO
-    assert msg.media_id == "media_audio_777"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.AUDIO
+    assert msg.media_id == "media_audio_999"
     assert msg.media_mime_type == "audio/ogg; codecs=opus"
 
 
 def test_parse_valid_voice_message():
-    """WhatsApp voice notes are often labeled type: voice."""
     raw_message = {
         "from": "919876543210",
         "id": "wamid.voice001",
         "timestamp": "1732345682",
         "type": "voice",
         "voice": {
-            "id": "media_voice_666",
+            "id": "media_voice_888",
             "mime_type": "audio/ogg",
         },
     }
@@ -184,13 +199,13 @@ def test_parse_valid_voice_message():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.AUDIO
-    assert msg.media_id == "media_voice_666"
-    assert msg.media_mime_type == "audio/ogg"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.AUDIO
+    assert msg.media_id == "media_voice_888"
 
 
 # ==========================================
-# 4. Valid Location Message Tests
+# 5. Location Message Tests
 # ==========================================
 
 
@@ -213,16 +228,40 @@ def test_parse_valid_location_message():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.LOCATION
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.LOCATION
     assert msg.latitude == Decimal("12.9716")
     assert msg.longitude == Decimal("77.5946")
     assert msg.location_name == "Town Hall"
     assert msg.location_address == "MG Road, Bengaluru"
-    assert msg.text_content == "Town Hall, MG Road, Bengaluru"
+    assert msg.text_content is None
+
+
+def test_parse_location_missing_optional_name_and_address():
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.loc002",
+        "timestamp": "1732345684",
+        "type": "location",
+        "location": {
+            "latitude": "28.6139",
+            "longitude": "77.2090",
+        },
+    }
+    payload = _build_meta_payload(messages=[raw_message])
+
+    parsed = parse_webhook_payload(payload)
+    msg = parsed.messages[0]
+
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.latitude == Decimal("28.6139")
+    assert msg.longitude == Decimal("77.2090")
+    assert msg.location_name is None
+    assert msg.location_address is None
 
 
 # ==========================================
-# 5. Interactive & Button Reply Tests
+# 6. Interactive Button & List Reply Tests
 # ==========================================
 
 
@@ -246,9 +285,13 @@ def test_parse_valid_interactive_button_reply():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.INTERACTIVE
-    assert msg.text_content == "Yes"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.INTERACTIVE
     assert msg.raw_type == "interactive"
+    assert isinstance(msg.interactive_reply, InteractiveReply)
+    assert msg.interactive_reply.reply_type == InteractiveReplyType.BUTTON
+    assert msg.interactive_reply.reply_id == "btn_yes"
+    assert msg.interactive_reply.title == "Yes"
 
 
 def test_parse_valid_interactive_list_reply():
@@ -271,8 +314,12 @@ def test_parse_valid_interactive_list_reply():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.INTERACTIVE
-    assert msg.text_content == "Water Leakage"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.INTERACTIVE
+    assert isinstance(msg.interactive_reply, InteractiveReply)
+    assert msg.interactive_reply.reply_type == InteractiveReplyType.LIST
+    assert msg.interactive_reply.reply_id == "option_water"
+    assert msg.interactive_reply.title == "Water Leakage"
 
 
 def test_parse_valid_quick_reply_button():
@@ -292,39 +339,80 @@ def test_parse_valid_quick_reply_button():
     assert len(parsed.messages) == 1
     msg = parsed.messages[0]
 
-    assert msg.message_type == NormalizedMessageType.INTERACTIVE
-    assert msg.text_content == "No"
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.INTERACTIVE
+    assert isinstance(msg.interactive_reply, InteractiveReply)
+    assert msg.interactive_reply.reply_type == InteractiveReplyType.BUTTON
+    assert msg.interactive_reply.reply_id == "no"
+    assert msg.interactive_reply.title == "No"
 
 
 # ==========================================
-# 6. Missing Optional Fields
+# 7. Unsupported Message Types
 # ==========================================
 
 
-def test_parse_location_missing_optional_name_and_address():
+def test_unsupported_message_type_flagged_safely():
     raw_message = {
         "from": "919876543210",
-        "id": "wamid.loc002",
-        "timestamp": "1732345684",
-        "type": "location",
-        "location": {
-            "latitude": "28.6139",
-            "longitude": "77.2090",
-        },
+        "id": "wamid.doc001",
+        "timestamp": "1732345686",
+        "type": "document",
+        "document": {"id": "doc123", "filename": "report.pdf"},
     }
-    payload = _build_meta_payload(messages=[raw_message])
+    msg = extract_single_message(raw_message, raise_on_unsupported=False)
 
-    parsed = parse_webhook_payload(payload)
-    msg = parsed.messages[0]
+    assert isinstance(msg, IncomingWhatsAppMessage)
+    assert msg.message_type == MessageKind.UNSUPPORTED
+    assert msg.raw_type == "document"
+    assert msg.whatsapp_number == "919876543210"
 
-    assert msg.latitude == Decimal("28.6139")
-    assert msg.longitude == Decimal("77.2090")
-    assert msg.location_name is None
-    assert msg.location_address is None
+
+def test_unsupported_message_type_raises_when_requested():
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.sticker001",
+        "timestamp": "1732345687",
+        "type": "sticker",
+        "sticker": {"id": "stk123"},
+    }
+    with pytest.raises(UnsupportedMessageTypeError):
+        extract_single_message(raw_message, raise_on_unsupported=True)
 
 
 # ==========================================
-# 6. Missing Required Fields
+# 8. Multiple Messages in One Webhook
+# ==========================================
+
+
+def test_multiple_messages_in_one_webhook():
+    msg1 = {
+        "from": "919876543210",
+        "id": "wamid.multi001",
+        "timestamp": "1732345688",
+        "type": "text",
+        "text": {"body": "First message"},
+    }
+    msg2 = {
+        "from": "919876543210",
+        "id": "wamid.multi002",
+        "timestamp": "1732345689",
+        "type": "image",
+        "image": {"id": "media_img_multi", "mime_type": "image/jpeg"},
+    }
+    payload = _build_meta_payload(messages=[msg1, msg2])
+
+    parsed = parse_webhook_payload(payload)
+
+    assert len(parsed.messages) == 2
+    assert parsed.messages[0].whatsapp_message_id == "wamid.multi001"
+    assert parsed.messages[0].message_type == MessageKind.TEXT
+    assert parsed.messages[1].whatsapp_message_id == "wamid.multi002"
+    assert parsed.messages[1].message_type == MessageKind.IMAGE
+
+
+# ==========================================
+# 9. Missing or Malformed Fields
 # ==========================================
 
 
@@ -406,43 +494,6 @@ def test_location_invalid_coordinate_format():
         extract_single_message(raw_message)
 
 
-# ==========================================
-# 7. Unsupported Message Types
-# ==========================================
-
-
-def test_unsupported_message_type_flagged_safely():
-    raw_message = {
-        "from": "919876543210",
-        "id": "wamid.doc001",
-        "timestamp": "1732345686",
-        "type": "document",
-        "document": {"id": "doc123", "filename": "report.pdf"},
-    }
-    msg = extract_single_message(raw_message, raise_on_unsupported=False)
-
-    assert msg.message_type == NormalizedMessageType.UNSUPPORTED
-    assert msg.raw_type == "document"
-    assert msg.sender == "919876543210"
-
-
-def test_unsupported_message_type_raises_when_requested():
-    raw_message = {
-        "from": "919876543210",
-        "id": "wamid.sticker001",
-        "timestamp": "1732345687",
-        "type": "sticker",
-        "sticker": {"id": "stk123"},
-    }
-    with pytest.raises(UnsupportedMessageTypeError):
-        extract_single_message(raw_message, raise_on_unsupported=True)
-
-
-# ==========================================
-# 8. Empty or Malformed Payloads
-# ==========================================
-
-
 @pytest.mark.parametrize(
     "malformed_payload",
     [
@@ -459,38 +510,81 @@ def test_malformed_payloads_raise_validation_error(malformed_payload):
 
 
 # ==========================================
-# 9. Multiple Messages in One Webhook
+# 10. Timestamp Normalization to UTC
 # ==========================================
 
 
-def test_multiple_messages_in_one_webhook():
-    msg1 = {
+def test_timestamp_numeric_string_normalized_to_utc():
+    raw_message = {
         "from": "919876543210",
-        "id": "wamid.multi001",
-        "timestamp": "1732345688",
+        "id": "wamid.ts001",
+        "timestamp": "1732345678",
         "type": "text",
-        "text": {"body": "First message"},
+        "text": {"body": "Timestamp test"},
     }
-    msg2 = {
+    msg = extract_single_message(raw_message)
+    assert msg.timestamp.tzinfo == UTC
+    assert msg.timestamp == datetime(2024, 11, 23, 7, 7, 58, tzinfo=UTC)
+
+
+def test_timestamp_iso_with_timezone_offset_normalized_to_utc():
+    raw_message = {
         "from": "919876543210",
-        "id": "wamid.multi002",
-        "timestamp": "1732345689",
-        "type": "image",
-        "image": {"id": "media_img_multi", "mime_type": "image/jpeg"},
+        "id": "wamid.ts002",
+        "timestamp": "2026-11-24T12:00:00+05:30",
+        "type": "text",
+        "text": {"body": "ISO timestamp test"},
     }
-    payload = _build_meta_payload(messages=[msg1, msg2])
+    msg = extract_single_message(raw_message)
+    assert msg.timestamp.tzinfo == UTC
+    assert msg.timestamp == datetime(2026, 11, 24, 6, 30, 0, tzinfo=UTC)
 
-    parsed = parse_webhook_payload(payload)
 
-    assert len(parsed.messages) == 2
-    assert parsed.messages[0].whatsapp_message_id == "wamid.multi001"
-    assert parsed.messages[0].message_type == NormalizedMessageType.TEXT
-    assert parsed.messages[1].whatsapp_message_id == "wamid.multi002"
-    assert parsed.messages[1].message_type == NormalizedMessageType.IMAGE
+def test_naive_timestamp_string_rejected():
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.ts003",
+        "timestamp": "2026-11-24T12:00:00",
+        "type": "text",
+        "text": {"body": "Naive timestamp"},
+    }
+    with pytest.raises(PayloadValidationError) as exc_info:
+        extract_single_message(raw_message)
+    assert "Timestamp must be timezone-aware" in str(exc_info.value)
 
 
 # ==========================================
-# 10. Status Notifications Without Incoming Messages
+# 11. Invalid Coordinates Rejected by Pydantic
+# ==========================================
+
+
+@pytest.mark.parametrize(
+    "lat,lon,expected_error",
+    [
+        (Decimal("95.0"), Decimal("77.0"), "Latitude must be between -90 and 90"),
+        (Decimal("-95.0"), Decimal("77.0"), "Latitude must be between -90 and 90"),
+        (Decimal("12.0"), Decimal("185.0"), "Longitude must be between -180 and 180"),
+        (Decimal("12.0"), Decimal("-185.0"), "Longitude must be between -180 and 180"),
+    ],
+)
+def test_invalid_coordinates_rejected_by_pydantic_validator(lat, lon, expected_error):
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.coord_err",
+        "timestamp": "1732345685",
+        "type": "location",
+        "location": {
+            "latitude": lat,
+            "longitude": lon,
+        },
+    }
+    with pytest.raises(PayloadValidationError) as exc_info:
+        extract_single_message(raw_message)
+    assert expected_error in str(exc_info.value)
+
+
+# ==========================================
+# 12. Webhook Status Events & Payloads Without Messages
 # ==========================================
 
 
@@ -522,13 +616,45 @@ def test_status_notifications_separated_from_messages():
     assert len(extracted) == 0
 
 
+def test_payload_with_empty_entry_list():
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [],
+    }
+    parsed = parse_webhook_payload(payload)
+    assert parsed.messages == []
+    assert parsed.statuses == []
+
+
+def test_payload_with_entry_having_no_messages_or_statuses():
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "100200300",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    parsed = parse_webhook_payload(payload)
+    assert parsed.messages == []
+    assert parsed.statuses == []
+
+
 def test_status_missing_required_fields():
     with pytest.raises(PayloadValidationError):
         extract_single_status({"status": "delivered"})  # missing id and recipient_id
 
 
 # ==========================================
-# 11. extract_messages Filter Convenience
+# 13. extract_messages Filter Convenience
 # ==========================================
 
 
@@ -552,3 +678,30 @@ def test_extract_messages_omits_unsupported_when_requested():
     filtered = extract_messages(payload, include_unsupported=False)
     assert len(filtered) == 1
     assert filtered[0].whatsapp_message_id == "wamid.valid"
+    assert isinstance(filtered[0], IncomingWhatsAppMessage)
+
+
+# ==========================================
+# 14. Webhook Route Integration Test
+# ==========================================
+
+
+def test_test_parser_endpoint_integration():
+    from app.api.routes.webhooks import test_parse_whatsapp_payload
+
+    raw_message = {
+        "from": "919876543210",
+        "id": "wamid.api001",
+        "timestamp": "1732345678",
+        "type": "text",
+        "text": {"body": "Testing endpoint"},
+    }
+    payload = _build_meta_payload(messages=[raw_message])
+    result = test_parse_whatsapp_payload(payload)
+    assert isinstance(result, ParsedWebhookPayload)
+    assert len(result.messages) == 1
+    assert result.messages[0].whatsapp_number == "919876543210"
+    assert result.messages[0].message_type == MessageKind.TEXT
+    assert result.messages[0].text_content == "Testing endpoint"
+
+
