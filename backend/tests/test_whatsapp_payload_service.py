@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
+
 import pytest
 from pydantic import BaseModel
 
@@ -11,7 +12,6 @@ from app.schemas.whatsapp_message import (
 )
 from app.services.whatsapp_payload_service import (
     NormalizedStatus,
-    ParsedWebhookPayload,
     PayloadValidationError,
     UnsupportedMessageTypeError,
     extract_messages,
@@ -687,7 +687,9 @@ def test_extract_messages_omits_unsupported_when_requested():
 
 
 def test_test_parser_endpoint_integration():
-    from app.api.routes.webhooks import test_parse_whatsapp_payload
+    from fastapi.testclient import TestClient
+
+    from app.main import app
 
     raw_message = {
         "from": "919876543210",
