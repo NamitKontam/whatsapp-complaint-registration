@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from app.main import app
 from app.schemas.whatsapp_message import (
     IncomingWhatsAppMessage,
     InteractiveReply,
@@ -686,11 +688,8 @@ def test_extract_messages_omits_unsupported_when_requested():
 # ==========================================
 
 
+
 def test_test_parser_endpoint_integration():
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
     raw_message = {
         "from": "919876543210",
         "id": "wamid.api001",
@@ -698,12 +697,19 @@ def test_test_parser_endpoint_integration():
         "type": "text",
         "text": {"body": "Testing endpoint"},
     }
+
     payload = _build_meta_payload(messages=[raw_message])
-    result = test_parse_whatsapp_payload(payload)
-    assert isinstance(result, ParsedWebhookPayload)
-    assert len(result.messages) == 1
-    assert result.messages[0].whatsapp_number == "919876543210"
-    assert result.messages[0].message_type == MessageKind.TEXT
-    assert result.messages[0].text_content == "Testing endpoint"
 
+    client = TestClient(app)
+    response = client.post(
+        "/api/webhooks/whatsapp/test-parser",
+        json=payload,
+    )
 
+    assert response.status_code == 200
+
+    data = response.json()
+    assert len(data["messages"]) == 1
+    assert data["messages"][0]["whatsapp_number"] == "919876543210"
+    assert data["messages"][0]["message_type"] == "TEXT"
+    assert data["messages"][0]["text_content"] == "Testing endpoint"

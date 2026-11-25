@@ -7,6 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.models.complaint import Complaint, ComplaintStatus, ConversationState
 from app.models.complaint_message import ComplaintMessage, MessageType
+from app.models.outbound_whatsapp_message import (
+    OutboundMessageStatus,
+    OutboundWhatsAppMessage,
+)
 from app.models.user import User
 from app.schemas.whatsapp_message import (
     IncomingWhatsAppMessage,
@@ -205,3 +209,147 @@ def _try_submit_complaint(
         raise
 
     return True
+
+
+def _enqueue_outbound_reply(
+    db: Session,
+    result: ComplaintProcessingResult,
+    recipient: str,
+) -> None:
+    # Import locally to avoid a circular import:
+    # whatsapp_reply_service imports ComplaintProcessingResult.
+    from app.services.whatsapp_reply_service import (
+        get_whatsapp_reply,
+    )
+
+    reply_text = get_whatsapp_reply(result)
+
+    # Duplicate messages and other no-reply cases are not queued.
+    if reply_text is None:
+        return
+
+    outbound_message = OutboundWhatsAppMessage(
+        inbound_message_id=result.message.id,
+        complaint_id=result.complaint.id,
+        recipient=recipient,
+        body=reply_text,
+        status=OutboundMessageStatus.PENDING,
+    )
+
+    db.add(outbound_message)
+
+
+
+def process_incoming_message(
+    db: Session,
+    message: IncomingWhatsAppMessage,
+) -> ComplaintProcessingResult:
+    try:
+        # 1. Get or create the user and lock their row.
+        user = _get_locked_user(
+            db=db,
+            whatsapp_number=message.whatsapp_number,
+        )
+
+        # 2. Check whether this WhatsApp message was already processed.
+        existing_message = _get_existing_message(
+            db=db,
+            whatsapp_message_id=message.whatsapp_message_id,
+        )
+
+        # 3. If duplicate, return the existing result.
+        if existing_message is not None:
+            result = _build_duplicate_result(
+                db=db,
+                existing_message=existing_message,
+                user=user,
+            )
+
+            # Commit releases the database row lock.
+            db.commit()
+
+            return result
+        
+
+        # 4. Get or create the user's active complaint.
+        complaint = _get_active_complaint(
+            db=db,
+            user=user,
+        )
+
+        # 5. Classify the incoming message.
+        event = _classify_message_event(message)
+
+        # 6. Save the incoming message and its metadata.
+        saved_message, is_new = _save_incoming_message(
+            db=db,
+            complaint=complaint,
+            message=message,
+        )
+
+        # 7. Handle a duplicate detected during message insertion.
+        if not is_new:
+            _validate_duplicate_message_owner(
+                db=db,
+                existing_message=saved_message,
+                user_id=user.id,
+            )
+
+            result = _build_duplicate_result(
+                db=db,
+                existing_message=saved_message,
+                user=user,
+            )
+
+            db.commit()
+            return result
+
+        
+        # 8. Handle submission before changing the state to COMPLETED.
+        submitted = False
+        needs_more_information = False
+
+        if event == ConversationEvent.NO:
+            submitted = _try_submit_complaint(
+                db=db,
+                complaint=complaint,
+            )
+
+            needs_more_information = not submitted
+        else:
+            # Ordinary messages and YES replies update the state here.
+            _update_conversation_state(
+                complaint=complaint,
+                event=event,
+            )
+
+
+
+        # 9. Build the processing result.
+        result = ComplaintProcessingResult(
+            user=user,
+            complaint=complaint,
+            message=saved_message,
+            event=event,
+            is_duplicate=False,
+            submitted=submitted,
+            needs_more_information=needs_more_information,
+        )
+
+        # 10. Queue the reply in the same transaction.
+        _enqueue_outbound_reply(
+            db=db,
+            result=result,
+            recipient=message.whatsapp_number,
+        )
+
+        # 11. Commit the complaint, inbound message, and outbox together.
+        db.commit()
+
+        return result
+
+
+
+    except Exception:
+        db.rollback()
+        raise

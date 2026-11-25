@@ -3,10 +3,11 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from app.db.base import Base
 from sqlalchemy import DateTime, ForeignKey, String, Uuid, func
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
 
 
 class ComplaintStatus(str, Enum):

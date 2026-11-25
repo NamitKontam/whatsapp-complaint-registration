@@ -1,6 +1,7 @@
 
-from app.api.routes.webhooks import router as webhook_router
 from fastapi import FastAPI
+
+from app.api.routes.webhooks import router as webhook_router
 
 app = FastAPI(
     title="WhatsApp Complaint Registration System",
