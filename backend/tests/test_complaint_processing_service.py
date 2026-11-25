@@ -1,4 +1,3 @@
-
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -70,7 +69,6 @@ def create_incoming_message(
         message_type=message_type,
         **kwargs,
     )
-
 
 
 @pytest.mark.parametrize(

@@ -50,7 +50,6 @@ def get_or_create_active_complaint(db: Session, user_id: UUID) -> Complaint:
     return complaint
 
 
-
 def has_meaningful_complaint_message(
     db: Session,
     complaint_id: UUID,
