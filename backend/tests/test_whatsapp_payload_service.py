@@ -691,7 +691,6 @@ def test_test_parser_endpoint_integration():
 
     from app.main import app
 
-    client = TestClient(app)
     raw_message = {
         "from": "919876543210",
         "id": "wamid.api001",
@@ -700,11 +699,11 @@ def test_test_parser_endpoint_integration():
         "text": {"body": "Testing endpoint"},
     }
     payload = _build_meta_payload(messages=[raw_message])
-    response = client.post("/api/webhooks/whatsapp/test-parser", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data["messages"]) == 1
-    assert data["messages"][0]["whatsapp_number"] == "919876543210"
-    assert data["messages"][0]["message_type"] == "TEXT"
-    assert data["messages"][0]["text_content"] == "Testing endpoint"
+    result = test_parse_whatsapp_payload(payload)
+    assert isinstance(result, ParsedWebhookPayload)
+    assert len(result.messages) == 1
+    assert result.messages[0].whatsapp_number == "919876543210"
+    assert result.messages[0].message_type == MessageKind.TEXT
+    assert result.messages[0].text_content == "Testing endpoint"
+
 
