@@ -1,8 +1,9 @@
 
-from app.models.user import User
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
+
+from app.models.user import User
 
 
 def normalize_whatsapp_number(whatsapp_number: str) -> str:

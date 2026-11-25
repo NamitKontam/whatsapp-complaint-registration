@@ -4,14 +4,28 @@ import hmac
 import json
 import secrets
 
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app.core.config import get_settings
+from app.db.session import get_db
+from app.models.outbound_whatsapp_message import (
+    OutboundMessageStatus,
+    OutboundWhatsAppMessage,
+)
+from app.services.complaint_processing_service import (
+    process_incoming_message,
+)
+from app.services.whatsapp_outbox_service import (
+    dispatch_outbound_message,
+)
 from app.services.whatsapp_payload_service import (
     ParsedWebhookPayload,
     PayloadValidationError,
     parse_webhook_payload,
 )
-from fastapi import APIRouter, Body, Header, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
 
 router = APIRouter()
 
@@ -49,6 +63,7 @@ def verify_whatsapp_webhook(
 @router.post("/whatsapp")
 async def receive_whatsapp_webhook(
     request: Request,
+    db: Session = Depends(get_db),  # noqa: B008
     x_hub_signature_256: str | None = Header(default=None),
 ):
     settings = get_settings()
@@ -100,33 +115,58 @@ async def receive_whatsapp_webhook(
             detail="Invalid webhook payload",
         )
 
-    # Temporary inspection: identify message types without logging
-    # phone numbers or message contents.
-    message_types = []
+        # Normalize the verified Meta payload.
+    try:
+        parsed_payload = parse_webhook_payload(payload)
+    except PayloadValidationError as err:
+        raise HTTPException(
+            status_code=400,
+            detail=str(err),
+        ) from err
 
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
+    # Process incoming messages.
+    # Status events are acknowledged but do not create complaints.
+    processed_messages = 0
 
-            for status in value.get("statuses", []):
-                print(
-                    "WhatsApp message status:",
-                    status.get("status"),
-                    "Message ID:",
-                    status.get("id"),
-                    "Recipient:",
-                    status.get("recipient_id"),
-                    "Errors:",
-                    status.get("errors"),
-                )
+    
+    for message in parsed_payload.messages:
+        result = process_incoming_message(
+            db=db,
+            message=message,
+        )
+        processed_messages += 1
 
-            for message in value.get("messages", []):
-                message_types.append(message.get("type", "unknown"))
+        # Find the outbox row associated with this inbound message.
+        # This also works for duplicate webhook deliveries.
+        outbound_message = db.scalar(
+            select(OutboundWhatsAppMessage).where(
+                OutboundWhatsAppMessage.inbound_message_id
+                == result.message.id
+            )
+        )
 
-    print(f"WhatsApp webhook received. Message types: {message_types}")
+        if outbound_message is None:
+            continue
+
+        if outbound_message.status not in {
+            OutboundMessageStatus.PENDING,
+            OutboundMessageStatus.FAILED,
+        }:
+            continue
+
+        # Complaint processing has already committed.
+        # Sending failure must not undo complaint registration.
+        await dispatch_outbound_message(
+            db=db,
+            outbound_message_id=outbound_message.id,
+        )
+
 
     # Acknowledge receipt to Meta.
-    return {"status": "received"}
+    return {
+        "status": "received",
+        "processed_messages": processed_messages,
+    }
 
 
 # ==============================================================================
@@ -141,7 +181,7 @@ async def receive_whatsapp_webhook(
     description="Test endpoint for Swagger: parses any WhatsApp webhook payload using the Pydantic parser and returns normalized messages and status receipts.",
 )
 def test_parse_whatsapp_payload(
-    payload: dict = Body(
+    payload: dict = Body(  # noqa: B008
         ...,
         openapi_examples={
             "Text Message": {

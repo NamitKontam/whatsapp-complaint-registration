@@ -50,16 +50,26 @@ def get_or_create_active_complaint(db: Session, user_id: UUID) -> Complaint:
     return complaint
 
 
+
 def has_meaningful_complaint_message(
     db: Session,
     complaint_id: UUID,
 ) -> bool:
     """Check whether a complaint contains meaningful information."""
 
+    normalized_text = func.lower(
+        func.regexp_replace(
+            ComplaintMessage.text_content,
+            r"\s",
+            "",
+            "g",
+        )
+    )
+
     statement = select(ComplaintMessage.id).where(
         ComplaintMessage.complaint_id == complaint_id,
         or_(
-            # Non-empty text message
+            # Non-empty text message that is not a conversation command
             (
                 (ComplaintMessage.message_type == MessageType.TEXT)
                 & (
@@ -68,8 +78,10 @@ def has_meaningful_complaint_message(
                         r"\s",
                         "",
                         "g",
-                    ) != ""
+                    )
+                    != ""
                 )
+                & normalized_text.notin_(("yes", "y", "no", "n"))
                 & ComplaintMessage.text_content.is_not(None)
             ),
             # Image or audio with a media ID

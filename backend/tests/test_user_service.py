@@ -1,6 +1,5 @@
 import pytest
 
-from app.models.user import User
 from app.services.user_service import (
     get_or_create_user,
     normalize_whatsapp_number,
