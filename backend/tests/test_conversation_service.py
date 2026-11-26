@@ -39,9 +39,11 @@ def test_classify_reply(reply, expected_event):
         (" Yeah! ", ConversationEvent.YES),
         ("yep", ConversationEvent.YES),
         ("sure.", ConversationEvent.YES),
-        ("OK", ConversationEvent.YES),
-        ("okay!", ConversationEvent.YES),
         ("nope", ConversationEvent.NO),
+        ("ok", ConversationEvent.MESSAGE_RECEIVED),
+        ("OK", ConversationEvent.MESSAGE_RECEIVED),
+        ("Okay", ConversationEvent.MESSAGE_RECEIVED),
+        ("okay!", ConversationEvent.MESSAGE_RECEIVED),
     ],
 )
 def test_classify_common_variants_when_asked_for_more_info(reply, expected_event):
@@ -50,7 +52,7 @@ def test_classify_common_variants_when_asked_for_more_info(reply, expected_event
 
 @pytest.mark.parametrize(
     "reply",
-    ["maybe", "Not sure!", " unsure "],
+    ["maybe", "Not sure!", " unsure ", "ok", "OK", "Okay", "okay"],
 )
 def test_identify_ambiguous_short_replies(reply):
     from app.services.conversation_service import is_ambiguous_short_reply

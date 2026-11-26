@@ -1177,18 +1177,6 @@ def test_expiry_for_one_user_does_not_affect_another_users_draft(db_session):
             False,
         ),
         (
-            "OK",
-            ConversationEvent.YES,
-            ConversationState.AWAITING_ADDITIONAL_INFO,
-            False,
-        ),
-        (
-            "okay.",
-            ConversationEvent.YES,
-            ConversationState.AWAITING_ADDITIONAL_INFO,
-            False,
-        ),
-        (
             "Nope",
             ConversationEvent.NO,
             ConversationState.COMPLETED,
@@ -1230,7 +1218,10 @@ def test_common_typed_replies_work_in_add_more_decision_state(
     assert reply_result.complaint.id == first_result.complaint.id
 
 
-@pytest.mark.parametrize("reply_text", ["Maybe", "Not sure!", " unsure "])
+@pytest.mark.parametrize(
+    "reply_text",
+    ["Maybe", "Not sure!", " unsure ", "ok", "OK", "Okay", "okay"],
+)
 def test_ambiguous_short_reply_clarifies_without_changing_draft(
     db_session,
     reply_text,
@@ -1258,7 +1249,9 @@ def test_ambiguous_short_reply_clarifies_without_changing_draft(
 
     assert result.is_ambiguous_reply is True
     assert result.event == ConversationEvent.MESSAGE_RECEIVED
+    assert result.submitted is False
     assert result.complaint.id == first_result.complaint.id
+    assert result.complaint.status == ComplaintStatus.DRAFT
     assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
     assert result.complaint.last_activity_at == base_time
     assert result.message.message_type == MessageType.OTHER
@@ -1266,6 +1259,10 @@ def test_ambiguous_short_reply_clarifies_without_changing_draft(
 
     reply = get_whatsapp_reply(result)
     assert isinstance(reply, InteractiveWhatsAppReply)
+    assert (
+        "Would you like to add more details, or submit your complaint? "
+        "Please choose one."
+    ) in reply.body
     assert "add more details" in reply.body
     assert "submit your complaint" in reply.body
     assert reply.buttons == (

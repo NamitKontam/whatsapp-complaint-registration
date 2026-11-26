@@ -26,7 +26,7 @@ def classify_reply(
     negative_replies = {"no", "n"}
 
     if allow_common_variants:
-        affirmative_replies.update({"yeah", "yep", "sure", "ok", "okay"})
+        affirmative_replies.update({"yeah", "yep", "sure"})
         negative_replies.add("nope")
 
     if normalized_text in affirmative_replies:
@@ -39,7 +39,7 @@ def classify_reply(
 
 
 def is_ambiguous_short_reply(text: str) -> bool:
-    return _normalize_reply(text) in {"maybe", "not sure", "unsure"}
+    return _normalize_reply(text) in {"maybe", "not sure", "unsure", "ok", "okay"}
 
 
 def is_greeting_reply(text: str) -> bool:
