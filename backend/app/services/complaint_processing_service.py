@@ -224,20 +224,29 @@ def _enqueue_outbound_reply(
     # Import locally to avoid a circular import:
     # whatsapp_reply_service imports ComplaintProcessingResult.
     from app.services.whatsapp_reply_service import (
+        InteractiveWhatsAppReply,
         get_whatsapp_reply,
     )
 
-    reply_text = get_whatsapp_reply(result)
+    reply = get_whatsapp_reply(result)
 
     # Duplicate messages and other no-reply cases are not queued.
-    if reply_text is None:
+    if reply is None:
         return
+
+    if isinstance(reply, InteractiveWhatsAppReply):
+        body = reply.body
+        interactive_buttons = [dict(button) for button in reply.buttons]
+    else:
+        body = reply
+        interactive_buttons = None
 
     outbound_message = OutboundWhatsAppMessage(
         inbound_message_id=result.message.id,
         complaint_id=result.complaint.id,
         recipient=recipient,
-        body=reply_text,
+        body=body,
+        interactive_buttons=interactive_buttons,
         status=OutboundMessageStatus.PENDING,
     )
 

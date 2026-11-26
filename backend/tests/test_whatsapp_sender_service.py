@@ -92,6 +92,72 @@ def test_send_text_message_success(monkeypatch):
     )
 
 
+def test_send_interactive_message_success(monkeypatch):
+    configure_settings(monkeypatch)
+
+    response = httpx.Response(
+        200,
+        json={"messages": [{"id": "wamid.interactive-id"}]},
+        request=httpx.Request(
+            "POST",
+            "https://graph.facebook.com/",
+        ),
+    )
+    mock_client = mock_http_client(monkeypatch, response)
+    buttons = [
+        {"id": "complaint_add_more", "title": "Yes, add details"},
+        {"id": "complaint_submit", "title": "No, submit"},
+    ]
+
+    result = asyncio.run(
+        sender.send_whatsapp_interactive_message(
+            recipient="919876543210",
+            text="Would you like to add more details to your complaint?",
+            buttons=buttons,
+        )
+    )
+
+    assert result["messages"][0]["id"] == "wamid.interactive-id"
+    call = mock_client.post.call_args
+    assert call.args[0] == (
+        "https://graph.facebook.com/"
+        "vXX.X/123456789/messages"
+    )
+    assert call.kwargs["headers"]["Authorization"] == (
+        "Bearer test-access-token"
+    )
+    assert call.kwargs["json"] == {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": "919876543210",
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": "Would you like to add more details to your complaint?"
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "complaint_add_more",
+                            "title": "Yes, add details",
+                        },
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "complaint_submit",
+                            "title": "No, submit",
+                        },
+                    },
+                ],
+            },
+        },
+    }
+
+
 def test_send_text_message_http_error(monkeypatch):
     configure_settings(monkeypatch)
 

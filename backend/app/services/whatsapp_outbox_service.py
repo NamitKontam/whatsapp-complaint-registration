@@ -10,6 +10,7 @@ from app.models.outbound_whatsapp_message import (
 )
 from app.services.whatsapp_sender_service import (
     WhatsAppSendError,
+    send_whatsapp_interactive_message,
     send_whatsapp_text_message,
 )
 
@@ -47,10 +48,17 @@ async def dispatch_outbound_message(
     db.commit()
 
     try:
-        response = await send_whatsapp_text_message(
-            recipient=outbound_message.recipient,
-            text=outbound_message.body,
-        )
+        if outbound_message.interactive_buttons is None:
+            response = await send_whatsapp_text_message(
+                recipient=outbound_message.recipient,
+                text=outbound_message.body,
+            )
+        else:
+            response = await send_whatsapp_interactive_message(
+                recipient=outbound_message.recipient,
+                text=outbound_message.body,
+                buttons=outbound_message.interactive_buttons,
+            )
 
         messages = response.get("messages", [])
         whatsapp_message_id = (

@@ -2,11 +2,15 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.models.complaint_message import MessageType
 from app.services.complaint_processing_service import (
     ComplaintProcessingResult,
 )
 from app.services.conversation_service import ConversationEvent
-from app.services.whatsapp_reply_service import get_whatsapp_reply
+from app.services.whatsapp_reply_service import (
+    InteractiveWhatsAppReply,
+    get_whatsapp_reply,
+)
 
 
 def make_result(
@@ -16,6 +20,7 @@ def make_result(
     submitted: bool = False,
     needs_more_information: bool = False,
     complaint_number: str | None = "CMP-0001",
+    message=None,
 ) -> ComplaintProcessingResult:
     """Build a lightweight processing result for reply tests."""
 
@@ -24,7 +29,7 @@ def make_result(
         complaint=SimpleNamespace(
             complaint_number=complaint_number,
         ),
-        message=Mock(),
+        message=message or Mock(),
         event=event,
         is_duplicate=is_duplicate,
         submitted=submitted,
@@ -62,6 +67,27 @@ def test_yes_reply_requests_additional_information():
     reply = get_whatsapp_reply(result)
 
     assert "additional information" in reply
+
+
+def test_meaningful_message_returns_add_more_interactive_reply():
+    result = make_result(
+        event=ConversationEvent.MESSAGE_RECEIVED,
+        message=SimpleNamespace(
+            message_type=MessageType.TEXT,
+            text_content="Water is leaking on the main road.",
+        ),
+    )
+
+    reply = get_whatsapp_reply(result)
+
+    assert isinstance(reply, InteractiveWhatsAppReply)
+    assert reply.body == (
+        "Would you like to add more details to your complaint?"
+    )
+    assert reply.buttons == (
+        {"id": "complaint_add_more", "title": "Yes, add details"},
+        {"id": "complaint_submit", "title": "No, submit"},
+    )
 
 
 def test_no_reply_requests_complaint_details():

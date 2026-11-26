@@ -29,7 +29,10 @@ from app.services.complaint_processing_service import (
 from app.services.complaint_service import get_or_create_active_complaint
 from app.services.conversation_service import ConversationEvent
 from app.services.user_service import get_or_create_user
-from app.services.whatsapp_reply_service import get_whatsapp_reply
+from app.services.whatsapp_reply_service import (
+    InteractiveWhatsAppReply,
+    get_whatsapp_reply,
+)
 
 
 @pytest.mark.parametrize(
@@ -1031,12 +1034,16 @@ def test_process_incoming_message_creates_pending_outbox_reply(
     )
 
     expected_reply = get_whatsapp_reply(result)
+    db_session.expire(outbound_message, ["interactive_buttons"])
 
-    assert expected_reply is not None
+    assert isinstance(expected_reply, InteractiveWhatsAppReply)
     assert outbound_message.inbound_message_id == result.message.id
     assert outbound_message.complaint_id == result.complaint.id
     assert outbound_message.recipient == message.whatsapp_number
-    assert outbound_message.body == expected_reply
+    assert outbound_message.body == expected_reply.body
+    assert outbound_message.interactive_buttons == list(
+        expected_reply.buttons
+    )
     assert outbound_message.status == OutboundMessageStatus.PENDING
     assert outbound_message.attempts == 0
 
@@ -1079,4 +1086,9 @@ def test_duplicate_incoming_message_does_not_create_duplicate_outbox(
     outbound_message = outbound_messages[0]
 
     assert outbound_message.status == OutboundMessageStatus.PENDING
-    assert outbound_message.body == get_whatsapp_reply(first_result)
+    expected_reply = get_whatsapp_reply(first_result)
+    assert isinstance(expected_reply, InteractiveWhatsAppReply)
+    assert outbound_message.body == expected_reply.body
+    assert outbound_message.interactive_buttons == list(
+        expected_reply.buttons
+    )

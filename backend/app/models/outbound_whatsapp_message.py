@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     ForeignKey,
     Integer,
@@ -54,6 +55,11 @@ class OutboundWhatsAppMessage(Base):
     body: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+    )
+
+    interactive_buttons: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JSON,
+        nullable=True,
     )
 
     status: Mapped[OutboundMessageStatus] = mapped_column(
