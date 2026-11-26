@@ -1,4 +1,3 @@
-
 import hashlib
 import hmac
 import json
@@ -13,6 +12,7 @@ from app.api.routes import webhooks
 from app.db.session import get_db
 from app.main import app
 from app.models.outbound_whatsapp_message import OutboundMessageStatus
+from app.services.whatsapp_media_service import WhatsAppMediaDownloadError
 
 META_APP_SECRET = "test-meta-app-secret"
 
@@ -32,9 +32,7 @@ PAYLOAD = {
                                 "id": "wamid.test_webhook_message",
                                 "timestamp": "1732345678",
                                 "type": "text",
-                                "text": {
-                                    "body": "Water leakage problem."
-                                },
+                                "text": {"body": "Water leakage problem."},
                             }
                         ],
                     },
@@ -62,7 +60,7 @@ def webhook_client(monkeypatch):
     monkeypatch.setattr(
         webhooks,
         "process_incoming_message",
-        MagicMock(),
+        AsyncMock(),
     )
 
     monkeypatch.setattr(
@@ -120,9 +118,7 @@ def test_webhook_dispatches_only_pending_or_failed_messages(
 
     inbound_message_id = uuid.uuid4()
 
-    result = SimpleNamespace(
-        message=SimpleNamespace(id=inbound_message_id)
-    )
+    result = SimpleNamespace(message=SimpleNamespace(id=inbound_message_id))
 
     webhooks.process_incoming_message.return_value = result
 
@@ -144,7 +140,7 @@ def test_webhook_dispatches_only_pending_or_failed_messages(
         "processed_messages": 1,
     }
 
-    webhooks.process_incoming_message.assert_called_once()
+    webhooks.process_incoming_message.assert_awaited_once()
 
     if should_dispatch:
         webhooks.dispatch_outbound_message.assert_awaited_once_with(
@@ -153,3 +149,20 @@ def test_webhook_dispatches_only_pending_or_failed_messages(
         )
     else:
         webhooks.dispatch_outbound_message.assert_not_awaited()
+
+
+def test_webhook_returns_retryable_error_for_media_download_failure(
+    webhook_client,
+):
+    client, _ = webhook_client
+    webhooks.process_incoming_message.side_effect = WhatsAppMediaDownloadError(
+        "Download failed"
+    )
+
+    response = send_webhook(client)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Incoming WhatsApp media could not be downloaded"
+    }
+    webhooks.dispatch_outbound_message.assert_not_awaited()

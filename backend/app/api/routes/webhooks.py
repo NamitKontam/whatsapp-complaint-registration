@@ -1,4 +1,3 @@
-
 import hashlib
 import hmac
 import json
@@ -18,6 +17,7 @@ from app.models.outbound_whatsapp_message import (
 from app.services.complaint_processing_service import (
     process_incoming_message,
 )
+from app.services.whatsapp_media_service import WhatsAppMediaDownloadError
 from app.services.whatsapp_outbox_service import (
     dispatch_outbound_message,
 )
@@ -33,12 +33,8 @@ router = APIRouter()
 @router.get("/whatsapp", response_class=PlainTextResponse)
 def verify_whatsapp_webhook(
     hub_mode: str | None = Query(default=None, alias="hub.mode"),
-    hub_verify_token: str | None = Query(
-        default=None, alias="hub.verify_token"
-    ),
-    hub_challenge: str | None = Query(
-        default=None, alias="hub.challenge"
-    ),
+    hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
 ):
     settings = get_settings()
 
@@ -84,11 +80,14 @@ async def receive_whatsapp_webhook(
     body = await request.body()
 
     # Calculate the expected Meta signature.
-    expected_signature = "sha256=" + hmac.new(
-        settings.meta_app_secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected_signature = (
+        "sha256="
+        + hmac.new(
+            settings.meta_app_secret.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     # Compare signatures safely.
     if not hmac.compare_digest(
@@ -128,20 +127,24 @@ async def receive_whatsapp_webhook(
     # Status events are acknowledged but do not create complaints.
     processed_messages = 0
 
-    
     for message in parsed_payload.messages:
-        result = process_incoming_message(
-            db=db,
-            message=message,
-        )
+        try:
+            result = await process_incoming_message(
+                db=db,
+                message=message,
+            )
+        except WhatsAppMediaDownloadError as err:
+            raise HTTPException(
+                status_code=503,
+                detail="Incoming WhatsApp media could not be downloaded",
+            ) from err
         processed_messages += 1
 
         # Find the outbox row associated with this inbound message.
         # This also works for duplicate webhook deliveries.
         outbound_message = db.scalar(
             select(OutboundWhatsAppMessage).where(
-                OutboundWhatsAppMessage.inbound_message_id
-                == result.message.id
+                OutboundWhatsAppMessage.inbound_message_id == result.message.id
             )
         )
 
@@ -160,7 +163,6 @@ async def receive_whatsapp_webhook(
             db=db,
             outbound_message_id=outbound_message.id,
         )
-
 
     # Acknowledge receipt to Meta.
     return {

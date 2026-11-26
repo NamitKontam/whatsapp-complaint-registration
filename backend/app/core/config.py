@@ -1,7 +1,7 @@
-
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     # Media storage
     media_storage_dir: Path = Path("storage/media")
+    whatsapp_media_max_size_bytes: int = Field(
+        default=5_000_000,
+        gt=0,
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

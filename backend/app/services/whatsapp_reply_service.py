@@ -1,13 +1,14 @@
-
 from dataclasses import dataclass
 from typing import TypedDict
 
+from app.core.config import get_settings
 from app.models.complaint import ConversationState
 from app.models.complaint_message import MessageType
 from app.services.complaint_processing_service import (
     ComplaintProcessingResult,
 )
 from app.services.conversation_service import ConversationEvent
+from app.services.whatsapp_media_service import get_media_upload_guidance
 
 
 class ReplyButton(TypedDict):
@@ -19,6 +20,16 @@ class ReplyButton(TypedDict):
 class InteractiveWhatsAppReply:
     body: str
     buttons: tuple[ReplyButton, ...]
+
+
+def _with_media_guidance(message: str) -> str:
+    guidance = get_media_upload_guidance(get_settings())
+    return (
+        f"{message}\n\n"
+        "You can provide text, a photo/image, an audio/voice message, "
+        "or a location. "
+        f"{guidance.format_message()}"
+    )
 
 
 def _current_message_has_meaningful_details(
@@ -39,10 +50,7 @@ def _current_message_has_meaningful_details(
         return message.media_id is not None
 
     if message.message_type == MessageType.LOCATION:
-        return (
-            message.latitude is not None
-            and message.longitude is not None
-        )
+        return message.latitude is not None and message.longitude is not None
 
     return False
 
@@ -64,7 +72,7 @@ def get_whatsapp_reply(
         )
 
     if result.needs_more_information:
-        return (
+        return _with_media_guidance(
             "We need more information to register your complaint. "
             "Please describe the issue in detail."
         )
@@ -74,36 +82,38 @@ def get_whatsapp_reply(
             result.complaint.conversation_state
             == ConversationState.AWAITING_ADDITIONAL_INFO
         ):
-            return (
-                "Hello! Please send the additional information "
-                "about your complaint."
+            return _with_media_guidance(
+                "Hello! Please send the additional information about your complaint."
             )
 
         if (
             result.complaint.conversation_state
             == ConversationState.ASKING_FOR_MORE_INFO
         ):
-            return (
-                "Hello! Please continue sharing the details "
-                "of your complaint."
+            return _with_media_guidance(
+                "Hello! Please continue sharing the details of your complaint."
             )
 
-        return "Hello! Please describe the issue you want to report."
+        return _with_media_guidance(
+            "Hello! Please describe the issue you want to report."
+        )
 
     if result.event == ConversationEvent.YES:
-        return (
+        return _with_media_guidance(
             "Please send the additional information about your complaint."
         )
 
     if result.event == ConversationEvent.NO:
-        return (
+        return _with_media_guidance(
             "Your complaint could not be registered yet. "
             "Please provide more details about the issue."
         )
 
     if _current_message_has_meaningful_details(result):
         return InteractiveWhatsAppReply(
-            body="Would you like to add more details to your complaint?",
+            body=_with_media_guidance(
+                "Would you like to add more details to your complaint?"
+            ),
             buttons=(
                 {
                     "id": "complaint_add_more",
@@ -116,7 +126,7 @@ def get_whatsapp_reply(
             ),
         )
 
-    return (
+    return _with_media_guidance(
         "Thank you for your message. "
         "Please continue sharing the details of your complaint."
     )

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -16,6 +17,7 @@ from app.schemas.whatsapp_message import (
     InteractiveReplyType,
     MessageKind,
 )
+from app.services import complaint_processing_service as processing_service
 from app.services.complaint_processing_service import (
     _build_duplicate_result,
     _classify_message_event,
@@ -24,15 +26,25 @@ from app.services.complaint_processing_service import (
     _save_incoming_message,
     _try_submit_complaint,
     _update_conversation_state,
-    process_incoming_message,
+)
+from app.services.complaint_processing_service import (
+    process_incoming_message as async_process_incoming_message,
 )
 from app.services.complaint_service import get_or_create_active_complaint
 from app.services.conversation_service import ConversationEvent
 from app.services.user_service import get_or_create_user
+from app.services.whatsapp_media_service import (
+    WhatsAppMediaDownload,
+    WhatsAppMediaDownloadError,
+)
 from app.services.whatsapp_reply_service import (
     InteractiveWhatsAppReply,
     get_whatsapp_reply,
 )
+
+
+def process_incoming_message(**kwargs):
+    return asyncio.run(async_process_incoming_message(**kwargs))
 
 
 @pytest.mark.parametrize(
@@ -50,12 +62,11 @@ def test_map_message_type(incoming_type, expected_type):
     assert _map_message_type(incoming_type) == expected_type
 
 
-
 def create_incoming_message(
     message_type: MessageKind,
     **kwargs,
 ) -> IncomingWhatsAppMessage:
-    
+
     return IncomingWhatsAppMessage(
         whatsapp_number=kwargs.pop(
             "whatsapp_number",
@@ -141,10 +152,7 @@ def test_image_caption_no_is_not_a_submission_command():
         caption="No",
     )
 
-    assert (
-        _classify_message_event(message)
-        == ConversationEvent.MESSAGE_RECEIVED
-    )
+    assert _classify_message_event(message) == ConversationEvent.MESSAGE_RECEIVED
 
 
 def test_save_incoming_image_message_with_metadata(db_session):
@@ -181,6 +189,162 @@ def test_save_incoming_image_message_with_metadata(db_session):
 
     assert stored_message is not None
     assert stored_message.media_id == "media123"
+
+
+@pytest.mark.parametrize(
+    ("message_type", "media_mime_type", "raw_type", "caption"),
+    [
+        (MessageKind.IMAGE, "image/jpeg", "image", "Pothole on Main Road"),
+        (MessageKind.AUDIO, "audio/ogg; codecs=opus", "voice", None),
+    ],
+)
+def test_process_media_message_persists_storage_key_and_metadata(
+    db_session,
+    monkeypatch,
+    message_type,
+    media_mime_type,
+    raw_type,
+    caption,
+):
+    downloads = []
+
+    async def download_media(media_id, *, expected_mime_type):
+        downloads.append((media_id, expected_mime_type))
+        extension = ".jpg" if message_type == MessageKind.IMAGE else ".ogg"
+        return WhatsAppMediaDownload(
+            storage_key=f"{'a' * 32}{extension}",
+            media_id=media_id,
+            mime_type=media_mime_type.split(";")[0],
+            size_bytes=128,
+            sha256="a" * 64,
+        )
+
+    monkeypatch.setattr(
+        processing_service,
+        "download_whatsapp_media",
+        download_media,
+    )
+
+    message = create_incoming_message(
+        message_type,
+        whatsapp_message_id=f"wamid.media-{raw_type}",
+        media_id=f"media-{raw_type}",
+        media_mime_type=media_mime_type,
+        caption=caption,
+        raw_type=raw_type,
+    )
+    result = process_incoming_message(db=db_session, message=message)
+    stored_message = db_session.get(ComplaintMessage, result.message.id)
+
+    assert downloads == [(message.media_id, media_mime_type)]
+    assert result.message.whatsapp_message_id == message.whatsapp_message_id
+    assert stored_message is not None
+    expected_extension = ".jpg" if message_type == MessageKind.IMAGE else ".ogg"
+    assert stored_message.media_storage_key == f"{'a' * 32}{expected_extension}"
+    assert stored_message.media_id == message.media_id
+    assert stored_message.media_mime_type == media_mime_type
+    assert stored_message.caption == caption
+    assert stored_message.raw_type == raw_type
+    assert stored_message.message_type == (
+        MessageType.IMAGE if message_type == MessageKind.IMAGE else MessageType.AUDIO
+    )
+
+
+def test_duplicate_media_webhook_does_not_download_twice(
+    db_session,
+    monkeypatch,
+):
+    downloads = []
+
+    async def download_media(media_id, *, expected_mime_type):
+        downloads.append(media_id)
+        return WhatsAppMediaDownload(
+            storage_key=f"{'b' * 32}.png",
+            media_id=media_id,
+            mime_type="image/png",
+            size_bytes=32,
+            sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(
+        processing_service,
+        "download_whatsapp_media",
+        download_media,
+    )
+    message = create_incoming_message(
+        MessageKind.IMAGE,
+        whatsapp_message_id="wamid.duplicate-image",
+        media_id="duplicate-media",
+        media_mime_type="image/png",
+    )
+
+    first_result = process_incoming_message(db=db_session, message=message)
+    duplicate_result = process_incoming_message(db=db_session, message=message)
+
+    assert first_result.is_duplicate is False
+    assert duplicate_result.is_duplicate is True
+    assert duplicate_result.message.id == first_result.message.id
+    assert downloads == ["duplicate-media"]
+    assert (
+        db_session.query(ComplaintMessage)
+        .filter_by(whatsapp_message_id=message.whatsapp_message_id)
+        .count()
+        == 1
+    )
+
+
+def test_media_download_failure_preserves_existing_draft(
+    db_session,
+    monkeypatch,
+):
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            whatsapp_message_id="wamid.preexisting-draft",
+            text_content="Water is leaking on Main Road.",
+        ),
+    )
+
+    async def fail_download(media_id, *, expected_mime_type):
+        raise WhatsAppMediaDownloadError("Mock media download failure")
+
+    monkeypatch.setattr(
+        processing_service,
+        "download_whatsapp_media",
+        fail_download,
+    )
+    media_message = create_incoming_message(
+        MessageKind.IMAGE,
+        whatsapp_message_id="wamid.failed-image",
+        media_id="failed-media",
+        media_mime_type="image/jpeg",
+    )
+
+    with pytest.raises(
+        WhatsAppMediaDownloadError,
+        match="Mock media download failure",
+    ):
+        process_incoming_message(db=db_session, message=media_message)
+
+    db_session.expire_all()
+    existing_draft = db_session.get(Complaint, first_result.complaint.id)
+
+    assert existing_draft is not None
+    assert existing_draft.status == ComplaintStatus.DRAFT
+    assert existing_draft.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+    assert (
+        db_session.query(ComplaintMessage)
+        .filter_by(whatsapp_message_id=media_message.whatsapp_message_id)
+        .count()
+        == 0
+    )
+    assert (
+        db_session.query(OutboundWhatsAppMessage)
+        .filter(OutboundWhatsAppMessage.inbound_message_id == first_result.message.id)
+        .count()
+        == 1
+    )
 
 
 def test_save_incoming_location_message(db_session):
@@ -365,10 +529,7 @@ def test_try_submit_complaint_without_meaningful_message(db_session):
 
     assert submitted is False
     assert complaint.status == ComplaintStatus.DRAFT
-    assert (
-        complaint.conversation_state
-        == ConversationState.ASKING_FOR_MORE_INFO
-    )
+    assert complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
     assert complaint.complaint_number is None
     assert complaint.completed_at is None
 
@@ -409,14 +570,9 @@ def test_process_incoming_message_creates_user_and_draft(
     assert result.user.whatsapp_number == "+919876543210"
 
     assert result.complaint.status == ComplaintStatus.DRAFT
-    assert (
-        result.complaint.conversation_state
-        == ConversationState.ASKING_FOR_MORE_INFO
-    )
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
 
-    assert result.message.text_content == (
-        "There is a water leak on my street"
-    )
+    assert result.message.text_content == ("There is a water leak on my street")
 
     assert result.message.complaint_id == result.complaint.id
 
@@ -436,14 +592,15 @@ def test_greeting_starts_new_conversation_without_complaint_details(
     assert result.event == ConversationEvent.MESSAGE_RECEIVED
     assert result.is_greeting is True
     assert result.complaint.status == ComplaintStatus.DRAFT
-    assert (
-        result.complaint.conversation_state
-        == ConversationState.AWAITING_COMPLAINT
-    )
+    assert result.complaint.conversation_state == ConversationState.AWAITING_COMPLAINT
     assert result.message.text_content is None
-    assert get_whatsapp_reply(result) == (
+    greeting_reply = get_whatsapp_reply(result)
+    assert greeting_reply.startswith(
         "Hello! Please describe the issue you want to report."
     )
+    assert "photo/image" in greeting_reply
+    assert "audio/voice message" in greeting_reply
+    assert "location" in greeting_reply
 
 
 def test_greeting_preserves_active_draft_and_conversation_state(
@@ -475,9 +632,8 @@ def test_greeting_preserves_active_draft_and_conversation_state(
         == ConversationState.ASKING_FOR_MORE_INFO
     )
     assert greeting_result.message.text_content is None
-    assert get_whatsapp_reply(greeting_result) == (
-        "Hello! Please continue sharing the details "
-        "of your complaint."
+    assert get_whatsapp_reply(greeting_result).startswith(
+        "Hello! Please continue sharing the details of your complaint."
     )
 
     yes_result = process_incoming_message(
@@ -507,9 +663,8 @@ def test_greeting_preserves_active_draft_and_conversation_state(
         == ConversationState.AWAITING_ADDITIONAL_INFO
     )
     assert additional_info_greeting.message.text_content is None
-    assert get_whatsapp_reply(additional_info_greeting) == (
-        "Hello! Please send the additional information "
-        "about your complaint."
+    assert get_whatsapp_reply(additional_info_greeting).startswith(
+        "Hello! Please send the additional information about your complaint."
     )
 
 
@@ -553,7 +708,7 @@ def test_greeting_after_submission_starts_a_new_draft(
         == ConversationState.AWAITING_COMPLAINT
     )
     assert greeting_result.message.text_content is None
-    assert get_whatsapp_reply(greeting_result) == (
+    assert get_whatsapp_reply(greeting_result).startswith(
         "Hello! Please describe the issue you want to report."
     )
 
@@ -642,9 +797,7 @@ def test_process_incoming_message_saves_additional_information(
         == ConversationState.ASKING_FOR_MORE_INFO
     )
 
-    assert details_result.message.text_content == (
-        "The leak is near the main road"
-    )
+    assert details_result.message.text_content == ("The leak is near the main road")
 
 
 @pytest.mark.parametrize(
@@ -670,6 +823,8 @@ def test_process_incoming_message_saves_additional_information(
             {
                 "latitude": Decimal("17.6599"),
                 "longitude": Decimal("75.9064"),
+                "location_name": "Solapur",
+                "location_address": "Solapur, Maharashtra",
             },
             MessageType.LOCATION,
         ),
@@ -677,10 +832,27 @@ def test_process_incoming_message_saves_additional_information(
 )
 def test_add_more_button_accepts_followup_details(
     db_session,
+    monkeypatch,
     message_type,
     message_fields,
     expected_message_type,
 ):
+    async def download_media(media_id, *, expected_mime_type):
+        extension = ".jpg" if expected_mime_type == "image/jpeg" else ".ogg"
+        return WhatsAppMediaDownload(
+            storage_key=f"{'c' * 32}{extension}",
+            media_id=media_id,
+            mime_type=expected_mime_type or "audio/ogg",
+            size_bytes=32,
+            sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(
+        processing_service,
+        "download_whatsapp_media",
+        download_media,
+    )
+
     first_result = process_incoming_message(
         db=db_session,
         message=create_incoming_message(
@@ -706,9 +878,9 @@ def test_add_more_button_accepts_followup_details(
     )
     assert add_more_result.message.text_content is None
     assert add_more_result.message.message_type == MessageType.OTHER
-    assert get_whatsapp_reply(add_more_result) == (
-        "Please send the additional information about your complaint."
-    )
+    add_more_reply = get_whatsapp_reply(add_more_result)
+    assert "Please send the additional information" in add_more_reply
+    assert "location" in add_more_reply
 
     details_result = process_incoming_message(
         db=db_session,
@@ -726,6 +898,11 @@ def test_add_more_button_accepts_followup_details(
         details_result.complaint.conversation_state
         == ConversationState.ASKING_FOR_MORE_INFO
     )
+    if expected_message_type == MessageType.LOCATION:
+        assert details_result.message.latitude == Decimal("17.6599")
+        assert details_result.message.longitude == Decimal("75.9064")
+        assert details_result.message.location_name == "Solapur"
+        assert details_result.message.location_address == ("Solapur, Maharashtra")
 
 
 def test_submit_button_submits_complaint_with_meaningful_details(
@@ -752,10 +929,7 @@ def test_submit_button_submits_complaint_with_meaningful_details(
     assert submit_result.submitted is True
     assert submit_result.complaint.id == first_result.complaint.id
     assert submit_result.complaint.status == ComplaintStatus.SUBMITTED
-    assert (
-        submit_result.complaint.conversation_state
-        == ConversationState.COMPLETED
-    )
+    assert submit_result.complaint.conversation_state == ConversationState.COMPLETED
     assert submit_result.message.text_content is None
     assert submit_result.message.message_type == MessageType.OTHER
     assert "registered successfully" in get_whatsapp_reply(submit_result)
@@ -800,10 +974,7 @@ def test_submit_button_without_meaningful_details_keeps_draft(
     assert result.submitted is False
     assert result.needs_more_information is True
     assert result.complaint.status == ComplaintStatus.DRAFT
-    assert (
-        result.complaint.conversation_state
-        == ConversationState.ASKING_FOR_MORE_INFO
-    )
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
     assert result.message.text_content is None
     assert result.message.message_type == MessageType.OTHER
     assert "more information" in get_whatsapp_reply(result)
@@ -839,12 +1010,10 @@ def test_process_incoming_message_no_submits_complaint(
     assert no_result.complaint.id == first_result.complaint.id
 
     assert no_result.complaint.status == ComplaintStatus.SUBMITTED
-    assert (
-        no_result.complaint.conversation_state
-        == ConversationState.COMPLETED
-    )
+    assert no_result.complaint.conversation_state == ConversationState.COMPLETED
 
     assert no_result.complaint.complaint_number is not None
+
 
 def test_process_incoming_message_no_without_meaningful_information(
     db_session,
@@ -864,10 +1033,7 @@ def test_process_incoming_message_no_without_meaningful_information(
     assert result.needs_more_information is True
 
     assert result.complaint.status == ComplaintStatus.DRAFT
-    assert (
-        result.complaint.conversation_state
-        == ConversationState.ASKING_FOR_MORE_INFO
-    )
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
     assert result.complaint.complaint_number is None
 
 
@@ -902,10 +1068,7 @@ def test_process_incoming_message_duplicate_webhook(
     # The message must exist only once in the database.
     message_count = (
         db_session.query(ComplaintMessage)
-        .filter(
-            ComplaintMessage.whatsapp_message_id
-            == "wamid.duplicate-webhook"
-        )
+        .filter(ComplaintMessage.whatsapp_message_id == "wamid.duplicate-webhook")
         .count()
     )
 
@@ -999,10 +1162,7 @@ def test_duplicate_submit_button_webhook_does_not_resubmit(
     )
     outbox_count = (
         db_session.query(OutboundWhatsAppMessage)
-        .filter(
-            OutboundWhatsAppMessage.inbound_message_id
-            == submit_result.message.id
-        )
+        .filter(OutboundWhatsAppMessage.inbound_message_id == submit_result.message.id)
         .count()
     )
 
@@ -1026,10 +1186,7 @@ def test_process_incoming_message_creates_pending_outbox_reply(
 
     outbound_message = (
         db_session.query(OutboundWhatsAppMessage)
-        .filter(
-            OutboundWhatsAppMessage.inbound_message_id
-            == result.message.id
-        )
+        .filter(OutboundWhatsAppMessage.inbound_message_id == result.message.id)
         .one()
     )
 
@@ -1041,9 +1198,7 @@ def test_process_incoming_message_creates_pending_outbox_reply(
     assert outbound_message.complaint_id == result.complaint.id
     assert outbound_message.recipient == message.whatsapp_number
     assert outbound_message.body == expected_reply.body
-    assert outbound_message.interactive_buttons == list(
-        expected_reply.buttons
-    )
+    assert outbound_message.interactive_buttons == list(expected_reply.buttons)
     assert outbound_message.status == OutboundMessageStatus.PENDING
     assert outbound_message.attempts == 0
 
@@ -1069,10 +1224,7 @@ def test_duplicate_incoming_message_does_not_create_duplicate_outbox(
 
     outbound_messages = (
         db_session.query(OutboundWhatsAppMessage)
-        .filter(
-            OutboundWhatsAppMessage.inbound_message_id
-            == first_result.message.id
-        )
+        .filter(OutboundWhatsAppMessage.inbound_message_id == first_result.message.id)
         .all()
     )
 
@@ -1089,6 +1241,4 @@ def test_duplicate_incoming_message_does_not_create_duplicate_outbox(
     expected_reply = get_whatsapp_reply(first_result)
     assert isinstance(expected_reply, InteractiveWhatsAppReply)
     assert outbound_message.body == expected_reply.body
-    assert outbound_message.interactive_buttons == list(
-        expected_reply.buttons
-    )
+    assert outbound_message.interactive_buttons == list(expected_reply.buttons)
