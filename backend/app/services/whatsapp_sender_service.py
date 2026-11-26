@@ -1,11 +1,27 @@
-
 import httpx
 
 from app.core.config import get_settings
 
 
 class WhatsAppSendError(Exception):
-    """Raised when a WhatsApp Cloud API message cannot be sent."""
+    """Raised for a definite WhatsApp Cloud API send failure."""
+
+
+class WhatsAppRetryableSendError(WhatsAppSendError):
+    """Raised when a send failed before acceptance and may safely be retried."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class WhatsAppUncertainSendError(WhatsAppSendError):
+    """Raised when Meta may have accepted the message but acceptance is unknown."""
 
 
 async def _send_whatsapp_payload(
@@ -45,16 +61,52 @@ async def _send_whatsapp_payload(
         response.raise_for_status()
 
     except httpx.HTTPStatusError as err:
+        status_code = err.response.status_code
+        if status_code == 429:
+            raise WhatsAppRetryableSendError(
+                "WhatsApp API rate-limited the send request.",
+                retry_after=err.response.headers.get("Retry-After"),
+            ) from err
+        if status_code == 408 or status_code >= 500:
+            raise WhatsAppUncertainSendError(
+                f"WhatsApp API returned HTTP {status_code}; acceptance is uncertain."
+            ) from err
         raise WhatsAppSendError(
-            f"WhatsApp API returned HTTP {err.response.status_code}"
+            f"WhatsApp API rejected the request with HTTP {status_code}."
+        ) from err
+
+    except (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+    ) as err:
+        raise WhatsAppRetryableSendError(
+            "The WhatsApp request failed before it was sent."
+        ) from err
+
+    except httpx.TimeoutException as err:
+        raise WhatsAppUncertainSendError(
+            "The WhatsApp request timed out after transmission may have started."
         ) from err
 
     except httpx.RequestError as err:
-        raise WhatsAppSendError(
-            "Could not connect to WhatsApp Cloud API"
+        raise WhatsAppUncertainSendError(
+            "The WhatsApp request outcome is unknown."
         ) from err
 
-    return response.json()
+    try:
+        result = response.json()
+    except ValueError as err:
+        raise WhatsAppUncertainSendError(
+            "WhatsApp returned an invalid success response."
+        ) from err
+
+    if not isinstance(result, dict):
+        raise WhatsAppUncertainSendError(
+            "WhatsApp returned an invalid success response."
+        )
+
+    return result
 
 
 async def send_whatsapp_text_message(

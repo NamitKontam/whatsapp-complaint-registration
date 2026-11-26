@@ -26,6 +26,9 @@ from app.services.whatsapp_payload_service import (
     PayloadValidationError,
     parse_webhook_payload,
 )
+from app.services.whatsapp_status_service import (
+    process_whatsapp_status_callback,
+)
 
 router = APIRouter()
 
@@ -124,7 +127,12 @@ async def receive_whatsapp_webhook(
         ) from err
 
     # Process incoming messages.
-    # Status events are acknowledged but do not create complaints.
+    for status_event in parsed_payload.statuses:
+        process_whatsapp_status_callback(
+            db=db,
+            status_event=status_event,
+        )
+
     processed_messages = 0
 
     for message in parsed_payload.messages:
@@ -163,7 +171,7 @@ async def receive_whatsapp_webhook(
 
         if outbound_message.status not in {
             OutboundMessageStatus.PENDING,
-            OutboundMessageStatus.FAILED,
+            OutboundMessageStatus.RETRY_SCHEDULED,
         }:
             continue
 

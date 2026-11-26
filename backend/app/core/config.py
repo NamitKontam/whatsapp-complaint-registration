@@ -39,6 +39,27 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    whatsapp_outbox_max_attempts: int = Field(
+        default=5,
+        gt=0,
+        le=100,
+    )
+    whatsapp_outbox_retry_base_seconds: int = Field(
+        default=30,
+        gt=0,
+        le=86400,
+    )
+    whatsapp_outbox_retry_max_seconds: int = Field(
+        default=3600,
+        gt=0,
+        le=86400,
+    )
+    whatsapp_outbox_poll_interval_seconds: int = Field(
+        default=5,
+        gt=0,
+        le=3600,
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

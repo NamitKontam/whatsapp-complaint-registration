@@ -65,6 +65,12 @@ def webhook_client(monkeypatch):
 
     monkeypatch.setattr(
         webhooks,
+        "process_whatsapp_status_callback",
+        MagicMock(),
+    )
+
+    monkeypatch.setattr(
+        webhooks,
         "dispatch_outbound_message",
         AsyncMock(),
     )
@@ -104,12 +110,13 @@ def send_webhook(client: TestClient, payload=PAYLOAD):
     ("status", "should_dispatch"),
     [
         (OutboundMessageStatus.PENDING, True),
-        (OutboundMessageStatus.FAILED, True),
+        (OutboundMessageStatus.RETRY_SCHEDULED, True),
+        (OutboundMessageStatus.FAILED, False),
         (OutboundMessageStatus.SENT, False),
         (None, False),
     ],
 )
-def test_webhook_dispatches_only_pending_or_failed_messages(
+def test_webhook_dispatches_only_pending_or_due_retry_candidates(
     webhook_client,
     status,
     should_dispatch,
@@ -141,6 +148,7 @@ def test_webhook_dispatches_only_pending_or_failed_messages(
     }
 
     webhooks.process_incoming_message.assert_awaited_once()
+    webhooks.process_whatsapp_status_callback.assert_not_called()
 
     if should_dispatch:
         webhooks.dispatch_outbound_message.assert_awaited_once_with(
@@ -149,6 +157,47 @@ def test_webhook_dispatches_only_pending_or_failed_messages(
         )
     else:
         webhooks.dispatch_outbound_message.assert_not_awaited()
+
+
+def test_webhook_processes_status_callbacks_without_inbound_messages(
+    webhook_client,
+):
+    client, _ = webhook_client
+    status_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "statuses": [
+                                {
+                                    "id": "wamid.outbound-status",
+                                    "status": "delivered",
+                                    "timestamp": "1795694400",
+                                    "recipient_id": "919876543210",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        ],
+    }
+
+    response = send_webhook(client, status_payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "received",
+        "processed_messages": 0,
+    }
+    webhooks.process_incoming_message.assert_not_awaited()
+    webhooks.process_whatsapp_status_callback.assert_called_once()
+    event = webhooks.process_whatsapp_status_callback.call_args.kwargs["status_event"]
+    assert event.whatsapp_message_id == "wamid.outbound-status"
+    assert event.status == "delivered"
 
 
 def test_webhook_returns_retryable_error_for_media_download_failure(

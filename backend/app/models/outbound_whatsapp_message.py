@@ -21,8 +21,10 @@ from app.db.base import Base
 
 class OutboundMessageStatus(str, Enum):
     PENDING = "PENDING"
+    RETRY_SCHEDULED = "RETRY_SCHEDULED"
     SENT = "SENT"
     FAILED = "FAILED"
+    UNCERTAIN = "UNCERTAIN"
 
 
 class OutboundWhatsAppMessage(Base):
@@ -98,9 +100,29 @@ class OutboundWhatsAppMessage(Base):
         nullable=True,
     )
 
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     whatsapp_message_id: Mapped[str | None] = mapped_column(
         String(255),
         unique=True,
+        nullable=True,
+    )
+
+    provider_status: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    provider_status_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
     )
 
