@@ -34,6 +34,11 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    complaint_draft_expiry_hours: int = Field(
+        default=24,
+        gt=0,
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

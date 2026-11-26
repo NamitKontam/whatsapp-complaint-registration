@@ -1,9 +1,11 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import Settings
 from app.models.complaint import (
     Complaint,
     ComplaintStatus,
@@ -66,6 +68,102 @@ def test_existing_active_draft_is_retrieved(db_session):
     assert first_complaint.id == second_complaint.id
 
 
+def test_active_draft_resumes_before_expiry(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    resumed = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=23),
+    )
+
+    assert resumed.id == complaint.id
+    assert resumed.status == ComplaintStatus.DRAFT
+
+
+def test_active_draft_remains_active_just_before_expiry(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    resumed = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=24) - timedelta(microseconds=1),
+    )
+
+    assert resumed.id == complaint.id
+    assert resumed.status == ComplaintStatus.DRAFT
+
+
+def test_active_draft_expires_at_24_hour_boundary(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=24),
+    )
+
+    assert complaint.status == ComplaintStatus.ABANDONED
+    assert replacement.id != complaint.id
+    assert replacement.status == ComplaintStatus.DRAFT
+
+
+def test_draft_without_meaningful_activity_expires_from_creation_time(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = created_at
+    complaint.last_activity_at = None
+    db_session.flush()
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=created_at + timedelta(hours=24),
+    )
+
+    assert complaint.status == ComplaintStatus.ABANDONED
+    assert replacement.id != complaint.id
+
+
+def test_configured_draft_expiry_duration_is_used(db_session, monkeypatch):
+    settings = Settings(_env_file=None, complaint_draft_expiry_hours=6)
+    monkeypatch.setattr(
+        "app.services.complaint_service.get_settings",
+        lambda: settings,
+    )
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=6),
+    )
+
+    assert complaint.status == ComplaintStatus.ABANDONED
+    assert replacement.id != complaint.id
+
+
 def test_different_users_get_separate_complaints(db_session):
     first_user = get_or_create_user(db_session, "919876543210")
     second_user = get_or_create_user(db_session, "919876543211")
@@ -92,6 +190,27 @@ def test_submitted_complaint_is_not_reused(db_session):
     assert second_complaint.id != first_complaint.id
     assert second_complaint.status == ComplaintStatus.DRAFT
     assert second_complaint.conversation_state == ConversationState.AWAITING_COMPLAINT
+
+
+def test_submitted_complaint_is_not_expired(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    add_complaint_message(
+        db_session,
+        complaint,
+        text_content="Water leakage near my house.",
+    )
+    submit_complaint(db_session, complaint)
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+    assert complaint.status == ComplaintStatus.SUBMITTED
+    assert replacement.id != complaint.id
+    assert replacement.status == ComplaintStatus.DRAFT
 
 
 def test_database_rejects_second_draft_for_same_user(db_session):

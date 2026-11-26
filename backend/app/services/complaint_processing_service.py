@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -179,8 +180,31 @@ def _build_duplicate_result(
 def _get_active_complaint(
     db: Session,
     user: User,
+    now: datetime,
 ) -> Complaint:
-    return get_or_create_active_complaint(db, user.id)
+    return get_or_create_active_complaint(db, user.id, now=now)
+
+
+def _is_meaningful_message(
+    message: IncomingWhatsAppMessage,
+    is_greeting: bool,
+) -> bool:
+    if is_greeting:
+        return False
+
+    if message.message_type == MessageKind.TEXT:
+        return bool((message.text_content or "").strip()) and (
+            classify_reply(message.text_content or "")
+            == ConversationEvent.MESSAGE_RECEIVED
+        )
+
+    if message.message_type in {MessageKind.IMAGE, MessageKind.AUDIO}:
+        return message.media_id is not None
+
+    if message.message_type == MessageKind.LOCATION:
+        return message.latitude is not None and message.longitude is not None
+
+    return False
 
 
 def _update_conversation_state(
@@ -249,8 +273,14 @@ def _enqueue_outbound_reply(
 async def process_incoming_message(
     db: Session,
     message: IncomingWhatsAppMessage,
+    *,
+    now: datetime | None = None,
 ) -> ComplaintProcessingResult:
     downloaded_media: WhatsAppMediaDownload | None = None
+    processing_time = now or datetime.now(UTC)
+    if processing_time.tzinfo is None or processing_time.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+    processing_time = processing_time.astimezone(UTC)
 
     try:
         # 1. Get or create the user and lock their row.
@@ -282,6 +312,7 @@ async def process_incoming_message(
         complaint = _get_active_complaint(
             db=db,
             user=user,
+            now=processing_time,
         )
 
         # 5. Download media only after the duplicate check, while the
@@ -300,6 +331,7 @@ async def process_incoming_message(
         is_greeting = message.message_type == MessageKind.TEXT and is_greeting_reply(
             message.text_content or ""
         )
+        is_meaningful = _is_meaningful_message(message, is_greeting)
 
         # 7. Save the incoming message and its metadata.
         saved_message, is_new = _save_incoming_message(
@@ -332,6 +364,9 @@ async def process_incoming_message(
 
             db.commit()
             return result
+
+        if is_meaningful:
+            complaint.last_activity_at = processing_time
 
         # 9. Handle submission before changing the state to COMPLETED.
         submitted = False

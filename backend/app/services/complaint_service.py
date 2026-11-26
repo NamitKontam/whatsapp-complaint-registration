@@ -1,10 +1,11 @@
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import UUID, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.complaint import (
     Complaint,
     ComplaintStatus,
@@ -17,7 +18,42 @@ from app.models.complaint_message import (
 from app.services.reference_service import generate_complaint_number
 
 
-def get_or_create_active_complaint(db: Session, user_id: UUID) -> Complaint:
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def get_or_create_active_complaint(
+    db: Session,
+    user_id: UUID,
+    now: datetime | None = None,
+) -> Complaint:
+    current_time = now or datetime.now(UTC)
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+    current_time = current_time.astimezone(UTC)
+
+    active_complaint = db.scalar(
+        select(Complaint)
+        .where(
+            Complaint.user_id == user_id,
+            Complaint.status == ComplaintStatus.DRAFT,
+        )
+        .with_for_update()
+    )
+
+    if active_complaint is not None:
+        last_activity = active_complaint.last_activity_at or active_complaint.created_at
+        expiry = timedelta(
+            hours=get_settings().complaint_draft_expiry_hours,
+        )
+        if current_time - _as_utc(last_activity) < expiry:
+            return active_complaint
+
+        active_complaint.status = ComplaintStatus.ABANDONED
+        db.flush()
+
     statement = (
         insert(Complaint)
         .values(

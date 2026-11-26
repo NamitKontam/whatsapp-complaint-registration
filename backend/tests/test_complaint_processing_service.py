@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -233,7 +233,12 @@ def test_process_media_message_persists_storage_key_and_metadata(
         caption=caption,
         raw_type=raw_type,
     )
-    result = process_incoming_message(db=db_session, message=message)
+    activity_time = datetime(2026, 1, 1, tzinfo=UTC)
+    result = process_incoming_message(
+        db=db_session,
+        message=message,
+        now=activity_time,
+    )
     stored_message = db_session.get(ComplaintMessage, result.message.id)
 
     assert downloads == [(message.media_id, media_mime_type)]
@@ -248,6 +253,26 @@ def test_process_media_message_persists_storage_key_and_metadata(
     assert stored_message.message_type == (
         MessageType.IMAGE if message_type == MessageKind.IMAGE else MessageType.AUDIO
     )
+    assert result.complaint.last_activity_at == activity_time
+
+
+def test_location_message_updates_draft_activity(db_session):
+    activity_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.LOCATION,
+            whatsapp_message_id="wamid.location-activity",
+            latitude=Decimal("17.6599"),
+            longitude=Decimal("75.9064"),
+            location_name="Central Gate",
+            location_address="Main Road",
+        ),
+        now=activity_time,
+    )
+
+    assert result.complaint.last_activity_at == activity_time
 
 
 def test_duplicate_media_webhook_does_not_download_twice(
@@ -711,6 +736,248 @@ def test_greeting_after_submission_starts_a_new_draft(
     assert get_whatsapp_reply(greeting_result).startswith(
         "Hello! Please describe the issue you want to report."
     )
+
+
+def test_expired_draft_is_abandoned_and_history_is_retained(db_session):
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.expired-draft-original",
+        ),
+        now=last_activity,
+    )
+    original_message_id = first_result.message.id
+    first_result.complaint.created_at = last_activity
+    first_result.complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    replacement_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="A new street light is broken",
+            whatsapp_message_id="wamid.expired-draft-replacement",
+        ),
+        now=last_activity + timedelta(hours=24),
+    )
+
+    assert first_result.complaint.status == ComplaintStatus.ABANDONED
+    assert replacement_result.complaint.id != first_result.complaint.id
+    assert replacement_result.complaint.status == ComplaintStatus.DRAFT
+    assert replacement_result.complaint.last_activity_at == (
+        last_activity + timedelta(hours=24)
+    )
+    assert (
+        db_session.get(ComplaintMessage, original_message_id).complaint_id
+        == first_result.complaint.id
+    )
+
+
+def test_greeting_does_not_refresh_active_draft_activity(db_session):
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.greeting-expiry-original",
+        ),
+        now=last_activity,
+    )
+    first_result.complaint.created_at = last_activity
+    first_result.complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    greeting_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Hi",
+            whatsapp_message_id="wamid.greeting-before-expiry",
+        ),
+        now=last_activity + timedelta(hours=23),
+    )
+
+    assert greeting_result.complaint.id == first_result.complaint.id
+    assert greeting_result.complaint.status == ComplaintStatus.DRAFT
+    assert greeting_result.complaint.last_activity_at == last_activity
+    assert greeting_result.message.text_content is None
+
+
+def test_greeting_after_expiry_starts_a_fresh_draft(db_session):
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.expired-greeting-original",
+        ),
+        now=last_activity,
+    )
+    first_result.complaint.created_at = last_activity
+    first_result.complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    greeting_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Hello",
+            whatsapp_message_id="wamid.expired-greeting-new",
+        ),
+        now=last_activity + timedelta(hours=24),
+    )
+
+    assert first_result.complaint.status == ComplaintStatus.ABANDONED
+    assert greeting_result.complaint.id != first_result.complaint.id
+    assert greeting_result.complaint.status == ComplaintStatus.DRAFT
+    assert greeting_result.complaint.conversation_state == (
+        ConversationState.AWAITING_COMPLAINT
+    )
+    assert greeting_result.complaint.last_activity_at is None
+    assert greeting_result.message.text_content is None
+    assert get_whatsapp_reply(greeting_result).startswith(
+        "Hello! Please describe the issue you want to report."
+    )
+
+
+def test_activity_timestamp_updates_only_for_meaningful_messages(db_session):
+    first_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.activity-original",
+        ),
+        now=first_activity,
+    )
+    first_result.complaint.created_at = first_activity
+    db_session.flush()
+
+    yes_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Yes",
+            whatsapp_message_id="wamid.activity-command",
+        ),
+        now=first_activity + timedelta(hours=1),
+    )
+    yes_activity = yes_result.complaint.last_activity_at
+    greeting_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Hey",
+            whatsapp_message_id="wamid.activity-greeting",
+        ),
+        now=first_activity + timedelta(hours=2),
+    )
+    greeting_activity = greeting_result.complaint.last_activity_at
+    details_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="The leak is beside the park entrance.",
+            whatsapp_message_id="wamid.activity-details",
+        ),
+        now=first_activity + timedelta(hours=3),
+    )
+
+    assert yes_activity == first_activity
+    assert greeting_activity == first_activity
+    assert details_result.complaint.last_activity_at == (
+        first_activity + timedelta(hours=3)
+    )
+    assert details_result.complaint.last_activity_at.tzinfo is not None
+    assert details_result.complaint.last_activity_at.astimezone(
+        UTC
+    ).utcoffset() == timedelta(0)
+
+
+def test_duplicate_webhook_does_not_refresh_activity_or_create_complaint(
+    db_session,
+):
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    message = create_incoming_message(
+        MessageKind.TEXT,
+        text_content="There is a water leak on my street",
+        whatsapp_message_id="wamid.activity-duplicate",
+    )
+    first_result = process_incoming_message(
+        db=db_session,
+        message=message,
+        now=last_activity,
+    )
+    first_result.complaint.created_at = last_activity
+    first_result.complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    duplicate_result = process_incoming_message(
+        db=db_session,
+        message=message,
+        now=last_activity + timedelta(hours=25),
+    )
+
+    assert duplicate_result.is_duplicate is True
+    assert duplicate_result.complaint.id == first_result.complaint.id
+    assert duplicate_result.complaint.status == ComplaintStatus.DRAFT
+    assert duplicate_result.complaint.last_activity_at == last_activity
+    assert (
+        db_session.query(Complaint)
+        .filter(Complaint.user_id == first_result.user.id)
+        .count()
+        == 1
+    )
+
+
+def test_expiry_for_one_user_does_not_affect_another_users_draft(db_session):
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    first_user_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Water is leaking on my street.",
+            whatsapp_number="919876543210",
+            whatsapp_message_id="wamid.user-one-original",
+        ),
+        now=last_activity,
+    )
+    second_user_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="The road has a pothole.",
+            whatsapp_number="919876543211",
+            whatsapp_message_id="wamid.user-two-original",
+        ),
+        now=last_activity,
+    )
+    for result in (first_user_result, second_user_result):
+        result.complaint.created_at = last_activity
+        result.complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    replacement_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="A new issue for the first user.",
+            whatsapp_number="919876543210",
+            whatsapp_message_id="wamid.user-one-after-expiry",
+        ),
+        now=last_activity + timedelta(hours=24),
+    )
+
+    assert first_user_result.complaint.status == ComplaintStatus.ABANDONED
+    assert second_user_result.complaint.status == ComplaintStatus.DRAFT
+    assert replacement_result.complaint.user_id == first_user_result.user.id
+    assert replacement_result.complaint.id != first_user_result.complaint.id
 
 
 def test_process_incoming_message_yes_asks_for_additional_info(
