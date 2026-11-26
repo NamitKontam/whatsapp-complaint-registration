@@ -5,29 +5,15 @@ import secrets
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.outbound_whatsapp_message import (
-    OutboundMessageStatus,
-    OutboundWhatsAppMessage,
-)
-from app.services.complaint_processing_service import (
-    process_incoming_message,
-)
-from app.services.whatsapp_media_service import WhatsAppMediaDownloadError
-from app.services.whatsapp_outbox_service import (
-    dispatch_outbound_message,
-)
+from app.services.whatsapp_inbox_service import persist_webhook_events
 from app.services.whatsapp_payload_service import (
     ParsedWebhookPayload,
     PayloadValidationError,
     parse_webhook_payload,
-)
-from app.services.whatsapp_status_service import (
-    process_whatsapp_status_callback,
 )
 
 router = APIRouter()
@@ -126,66 +112,15 @@ async def receive_whatsapp_webhook(
             detail=str(err),
         ) from err
 
-    # Process incoming messages.
-    for status_event in parsed_payload.statuses:
-        process_whatsapp_status_callback(
-            db=db,
-            status_event=status_event,
-        )
+    accepted_events = persist_webhook_events(
+        db=db,
+        parsed_payload=parsed_payload,
+    )
 
-    processed_messages = 0
-
-    for message in parsed_payload.messages:
-        try:
-            result = await process_incoming_message(
-                db=db,
-                message=message,
-            )
-        except WhatsAppMediaDownloadError as err:
-            raise HTTPException(
-                status_code=503,
-                detail="Incoming WhatsApp media could not be downloaded",
-            ) from err
-        processed_messages += 1
-
-        # Find the outbox row associated with this inbound message.
-        # This also works for duplicate webhook deliveries.
-        if result.message is not None:
-            outbound_filter = (
-                OutboundWhatsAppMessage.inbound_message_id == result.message.id
-            )
-        elif result.unsupported_inbound_message_id is not None:
-            outbound_filter = (
-                OutboundWhatsAppMessage.unsupported_inbound_message_id
-                == result.unsupported_inbound_message_id
-            )
-        else:
-            continue
-
-        outbound_message = db.scalar(
-            select(OutboundWhatsAppMessage).where(outbound_filter)
-        )
-
-        if outbound_message is None:
-            continue
-
-        if outbound_message.status not in {
-            OutboundMessageStatus.PENDING,
-            OutboundMessageStatus.RETRY_SCHEDULED,
-        }:
-            continue
-
-        # Complaint processing has already committed.
-        # Sending failure must not undo complaint registration.
-        await dispatch_outbound_message(
-            db=db,
-            outbound_message_id=outbound_message.id,
-        )
-
-    # Acknowledge receipt to Meta.
+    # Acknowledge only after all normalized events have been durably enqueued.
     return {
         "status": "received",
-        "processed_messages": processed_messages,
+        "accepted_events": accepted_events,
     }
 
 

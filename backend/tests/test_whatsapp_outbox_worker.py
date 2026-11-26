@@ -61,6 +61,8 @@ async def test_worker_continues_after_dispatch_exception(
 async def test_lifespan_cancels_outbox_worker_on_shutdown(monkeypatch):
     started = asyncio.Event()
     stopped = asyncio.Event()
+    inbox_started = asyncio.Event()
+    inbox_stopped = asyncio.Event()
 
     async def worker():
         started.set()
@@ -70,9 +72,20 @@ async def test_lifespan_cancels_outbox_worker_on_shutdown(monkeypatch):
             stopped.set()
             raise
 
+    async def inbox_worker():
+        inbox_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            inbox_stopped.set()
+            raise
+
     monkeypatch.setattr(main, "run_outbox_retry_worker", worker)
+    monkeypatch.setattr(main, "run_inbound_inbox_worker", inbox_worker)
 
     async with main.lifespan(FastAPI()):
         await started.wait()
+        await inbox_started.wait()
 
     assert stopped.is_set()
+    assert inbox_stopped.is_set()
