@@ -71,6 +71,21 @@ def create_incoming_message(
     )
 
 
+def create_interactive_button_message(
+    reply_id: str,
+    whatsapp_message_id: str,
+) -> IncomingWhatsAppMessage:
+    return create_incoming_message(
+        MessageKind.INTERACTIVE,
+        whatsapp_message_id=whatsapp_message_id,
+        interactive_reply=InteractiveReply(
+            reply_type=InteractiveReplyType.BUTTON,
+            reply_id=reply_id,
+            title=reply_id,
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("text", "expected_event"),
     [
@@ -199,7 +214,7 @@ def test_save_incoming_interactive_message(db_session):
         MessageKind.INTERACTIVE,
         interactive_reply=InteractiveReply(
             reply_type=InteractiveReplyType.BUTTON,
-            reply_id="complaint_yes",
+            reply_id="complaint_add_more",
             title="Yes",
         ),
     )
@@ -213,8 +228,9 @@ def test_save_incoming_interactive_message(db_session):
     assert is_new is True
     assert saved_message.message_type == MessageType.OTHER
     assert saved_message.interactive_reply_type == "BUTTON"
-    assert saved_message.interactive_reply_id == "complaint_yes"
+    assert saved_message.interactive_reply_id == "complaint_add_more"
     assert saved_message.interactive_reply_title == "Yes"
+    assert saved_message.text_content is None
 
 
 def test_build_duplicate_result_returns_existing_complaint(db_session):
@@ -402,6 +418,143 @@ def test_process_incoming_message_creates_user_and_draft(
     assert result.message.complaint_id == result.complaint.id
 
 
+def test_greeting_starts_new_conversation_without_complaint_details(
+    db_session,
+):
+    result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="Hi",
+            whatsapp_message_id="wamid.greeting-new",
+        ),
+    )
+
+    assert result.event == ConversationEvent.MESSAGE_RECEIVED
+    assert result.is_greeting is True
+    assert result.complaint.status == ComplaintStatus.DRAFT
+    assert (
+        result.complaint.conversation_state
+        == ConversationState.AWAITING_COMPLAINT
+    )
+    assert result.message.text_content is None
+    assert get_whatsapp_reply(result) == (
+        "Hello! Please describe the issue you want to report."
+    )
+
+
+def test_greeting_preserves_active_draft_and_conversation_state(
+    db_session,
+):
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.greeting-active-details",
+        ),
+    )
+
+    greeting_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="Hey!",
+            whatsapp_message_id="wamid.greeting-active",
+        ),
+    )
+
+    assert greeting_result.is_greeting is True
+    assert greeting_result.complaint.id == first_result.complaint.id
+    assert greeting_result.complaint.status == ComplaintStatus.DRAFT
+    assert (
+        greeting_result.complaint.conversation_state
+        == ConversationState.ASKING_FOR_MORE_INFO
+    )
+    assert greeting_result.message.text_content is None
+    assert get_whatsapp_reply(greeting_result) == (
+        "Hello! Please continue sharing the details "
+        "of your complaint."
+    )
+
+    yes_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="Yes",
+            whatsapp_message_id="wamid.greeting-active-yes",
+        ),
+    )
+    additional_info_greeting = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="Hi",
+            whatsapp_message_id="wamid.greeting-awaiting-additional",
+        ),
+    )
+
+    assert (
+        yes_result.complaint.conversation_state
+        == ConversationState.AWAITING_ADDITIONAL_INFO
+    )
+    assert additional_info_greeting.complaint.id == first_result.complaint.id
+    assert (
+        additional_info_greeting.complaint.conversation_state
+        == ConversationState.AWAITING_ADDITIONAL_INFO
+    )
+    assert additional_info_greeting.message.text_content is None
+    assert get_whatsapp_reply(additional_info_greeting) == (
+        "Hello! Please send the additional information "
+        "about your complaint."
+    )
+
+
+def test_greeting_after_submission_starts_a_new_draft(
+    db_session,
+):
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.greeting-submitted-details",
+        ),
+    )
+
+    submission_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="No",
+            whatsapp_message_id="wamid.greeting-submitted-no",
+        ),
+    )
+
+    greeting_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type=MessageKind.TEXT,
+            text_content="Hello",
+            whatsapp_message_id="wamid.greeting-after-submit",
+        ),
+    )
+
+    assert submission_result.submitted is True
+    assert submission_result.complaint.status == ComplaintStatus.SUBMITTED
+    assert greeting_result.is_greeting is True
+    assert greeting_result.complaint.id != first_result.complaint.id
+    assert greeting_result.complaint.status == ComplaintStatus.DRAFT
+    assert (
+        greeting_result.complaint.conversation_state
+        == ConversationState.AWAITING_COMPLAINT
+    )
+    assert greeting_result.message.text_content is None
+    assert get_whatsapp_reply(greeting_result) == (
+        "Hello! Please describe the issue you want to report."
+    )
+
+
 def test_process_incoming_message_yes_asks_for_additional_info(
     db_session,
 ):
@@ -489,6 +642,168 @@ def test_process_incoming_message_saves_additional_information(
     assert details_result.message.text_content == (
         "The leak is near the main road"
     )
+
+
+@pytest.mark.parametrize(
+    ("message_type", "message_fields", "expected_message_type"),
+    [
+        (
+            MessageKind.TEXT,
+            {"text_content": "The leak is near the main road"},
+            MessageType.TEXT,
+        ),
+        (
+            MessageKind.IMAGE,
+            {"media_id": "additional-image"},
+            MessageType.IMAGE,
+        ),
+        (
+            MessageKind.AUDIO,
+            {"media_id": "additional-audio"},
+            MessageType.AUDIO,
+        ),
+        (
+            MessageKind.LOCATION,
+            {
+                "latitude": Decimal("17.6599"),
+                "longitude": Decimal("75.9064"),
+            },
+            MessageType.LOCATION,
+        ),
+    ],
+)
+def test_add_more_button_accepts_followup_details(
+    db_session,
+    message_type,
+    message_fields,
+    expected_message_type,
+):
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.button-first-details",
+        ),
+    )
+
+    add_more_result = process_incoming_message(
+        db=db_session,
+        message=create_interactive_button_message(
+            "complaint_add_more",
+            "wamid.button-add-more",
+        ),
+    )
+
+    assert add_more_result.event == ConversationEvent.YES
+    assert add_more_result.complaint.id == first_result.complaint.id
+    assert (
+        add_more_result.complaint.conversation_state
+        == ConversationState.AWAITING_ADDITIONAL_INFO
+    )
+    assert add_more_result.message.text_content is None
+    assert add_more_result.message.message_type == MessageType.OTHER
+    assert get_whatsapp_reply(add_more_result) == (
+        "Please send the additional information about your complaint."
+    )
+
+    details_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type,
+            whatsapp_message_id="wamid.button-additional-details",
+            **message_fields,
+        ),
+    )
+
+    assert details_result.event == ConversationEvent.MESSAGE_RECEIVED
+    assert details_result.complaint.id == first_result.complaint.id
+    assert details_result.message.message_type == expected_message_type
+    assert (
+        details_result.complaint.conversation_state
+        == ConversationState.ASKING_FOR_MORE_INFO
+    )
+
+
+def test_submit_button_submits_complaint_with_meaningful_details(
+    db_session,
+):
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.button-submit-details",
+        ),
+    )
+
+    submit_result = process_incoming_message(
+        db=db_session,
+        message=create_interactive_button_message(
+            "complaint_submit",
+            "wamid.button-submit",
+        ),
+    )
+
+    assert submit_result.event == ConversationEvent.NO
+    assert submit_result.submitted is True
+    assert submit_result.complaint.id == first_result.complaint.id
+    assert submit_result.complaint.status == ComplaintStatus.SUBMITTED
+    assert (
+        submit_result.complaint.conversation_state
+        == ConversationState.COMPLETED
+    )
+    assert submit_result.message.text_content is None
+    assert submit_result.message.message_type == MessageType.OTHER
+    assert "registered successfully" in get_whatsapp_reply(submit_result)
+
+
+def test_submit_button_without_meaningful_details_keeps_draft(
+    db_session,
+):
+    empty_draft_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="No",
+            whatsapp_message_id="wamid.button-empty-draft-no",
+        ),
+    )
+    add_more_result = process_incoming_message(
+        db=db_session,
+        message=create_interactive_button_message(
+            "complaint_add_more",
+            "wamid.button-empty-add-more",
+        ),
+    )
+
+    assert empty_draft_result.needs_more_information is True
+    assert add_more_result.event == ConversationEvent.YES
+    assert (
+        add_more_result.complaint.conversation_state
+        == ConversationState.AWAITING_ADDITIONAL_INFO
+    )
+    assert add_more_result.message.text_content is None
+
+    result = process_incoming_message(
+        db=db_session,
+        message=create_interactive_button_message(
+            "complaint_submit",
+            "wamid.button-submit-empty",
+        ),
+    )
+
+    assert result.event == ConversationEvent.NO
+    assert result.submitted is False
+    assert result.needs_more_information is True
+    assert result.complaint.status == ComplaintStatus.DRAFT
+    assert (
+        result.complaint.conversation_state
+        == ConversationState.ASKING_FOR_MORE_INFO
+    )
+    assert result.message.text_content is None
+    assert result.message.message_type == MessageType.OTHER
+    assert "more information" in get_whatsapp_reply(result)
 
 
 def test_process_incoming_message_no_submits_complaint(
@@ -641,6 +956,55 @@ def test_duplicate_no_webhook_does_not_create_new_draft(
     )
 
     assert complaint_count == 1
+
+
+def test_duplicate_submit_button_webhook_does_not_resubmit(
+    db_session,
+):
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="There is a water leak on my street",
+            whatsapp_message_id="wamid.duplicate-button-details",
+        ),
+    )
+    submit_message = create_interactive_button_message(
+        "complaint_submit",
+        "wamid.duplicate-button-submit",
+    )
+
+    submit_result = process_incoming_message(
+        db=db_session,
+        message=submit_message,
+    )
+    duplicate_result = process_incoming_message(
+        db=db_session,
+        message=submit_message,
+    )
+
+    assert submit_result.submitted is True
+    assert duplicate_result.is_duplicate is True
+    assert duplicate_result.submitted is True
+    assert duplicate_result.complaint.id == first_result.complaint.id
+    assert duplicate_result.message.id == submit_result.message.id
+
+    complaint_count = (
+        db_session.query(Complaint)
+        .filter(Complaint.user_id == first_result.user.id)
+        .count()
+    )
+    outbox_count = (
+        db_session.query(OutboundWhatsAppMessage)
+        .filter(
+            OutboundWhatsAppMessage.inbound_message_id
+            == submit_result.message.id
+        )
+        .count()
+    )
+
+    assert complaint_count == 1
+    assert outbox_count == 1
 
 
 def test_process_incoming_message_creates_pending_outbox_reply(

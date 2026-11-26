@@ -26,6 +26,7 @@ from app.services.conversation_service import (
     classify_interactive_reply,
     classify_reply,
     get_next_conversation_state,
+    is_greeting_reply,
 )
 from app.services.user_service import get_or_create_user
 
@@ -39,6 +40,7 @@ class ComplaintProcessingResult:
     is_duplicate: bool
     submitted: bool
     needs_more_information: bool
+    is_greeting: bool = False
 
 
 def _map_message_type(message_type: MessageKind) -> MessageType:
@@ -115,6 +117,7 @@ def _save_incoming_message(
     db: Session,
     complaint: Complaint,
     message: IncomingWhatsAppMessage,
+    is_greeting: bool = False,
 ) -> tuple[ComplaintMessage, bool]:
     interactive_reply = message.interactive_reply
 
@@ -123,7 +126,9 @@ def _save_incoming_message(
         complaint_id=complaint.id,
         whatsapp_message_id=message.whatsapp_message_id,
         message_type=_map_message_type(message.message_type),
-        text_content=message.text_content,
+        text_content=(
+            None if is_greeting else message.text_content
+        ),
         media_id=message.media_id,
         media_mime_type=message.media_mime_type,
         caption=message.caption,
@@ -279,12 +284,17 @@ def process_incoming_message(
 
         # 5. Classify the incoming message.
         event = _classify_message_event(message)
+        is_greeting = (
+            message.message_type == MessageKind.TEXT
+            and is_greeting_reply(message.text_content or "")
+        )
 
         # 6. Save the incoming message and its metadata.
         saved_message, is_new = _save_incoming_message(
             db=db,
             complaint=complaint,
             message=message,
+            is_greeting=is_greeting,
         )
 
         # 7. Handle a duplicate detected during message insertion.
@@ -309,19 +319,20 @@ def process_incoming_message(
         submitted = False
         needs_more_information = False
 
-        if event == ConversationEvent.NO:
-            submitted = _try_submit_complaint(
-                db=db,
-                complaint=complaint,
-            )
+        if not is_greeting:
+            if event == ConversationEvent.NO:
+                submitted = _try_submit_complaint(
+                    db=db,
+                    complaint=complaint,
+                )
 
-            needs_more_information = not submitted
-        else:
-            # Ordinary messages and YES replies update the state here.
-            _update_conversation_state(
-                complaint=complaint,
-                event=event,
-            )
+                needs_more_information = not submitted
+            else:
+                # Ordinary messages and YES replies update the state here.
+                _update_conversation_state(
+                    complaint=complaint,
+                    event=event,
+                )
 
 
 
@@ -334,6 +345,7 @@ def process_incoming_message(
             is_duplicate=False,
             submitted=submitted,
             needs_more_information=needs_more_information,
+            is_greeting=is_greeting,
         )
 
         # 10. Queue the reply in the same transaction.

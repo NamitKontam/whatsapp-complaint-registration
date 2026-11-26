@@ -25,6 +25,13 @@ def classify_reply(text: str) -> ConversationEvent:
     return ConversationEvent.MESSAGE_RECEIVED
 
 
+def is_greeting_reply(text: str) -> bool:
+    """Identify common greetings without assigning them a conversation event."""
+
+    normalized_text = text.strip().casefold().strip(" \t\n\r.,!?")
+    return normalized_text in {"hi", "hello", "hey"}
+
+
 def classify_interactive_reply(
     reply: InteractiveReply,
 ) -> ConversationEvent:
