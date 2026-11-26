@@ -3,6 +3,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,30 @@ from app.models.inbound_whatsapp_event import (
     InboundWhatsAppEvent,
 )
 from app.services.whatsapp_payload_service import ParsedWebhookPayload
+
+
+class InboundEventLeaseLostError(RuntimeError):
+    """Raised when a worker no longer owns its inbox event."""
+
+
+def lock_inbound_event_claim(
+    db: Session,
+    *,
+    event_id: uuid.UUID,
+    worker_id: str,
+) -> None:
+    event = db.scalar(
+        select(InboundWhatsAppEvent)
+        .where(
+            InboundWhatsAppEvent.id == event_id,
+            InboundWhatsAppEvent.status == InboundEventStatus.PROCESSING,
+            InboundWhatsAppEvent.claimed_by == worker_id,
+            InboundWhatsAppEvent.lease_expires_at > func.now(),
+        )
+        .with_for_update()
+    )
+    if event is None:
+        raise InboundEventLeaseLostError("Inbox event lease is no longer owned")
 
 
 def _status_provider_timestamp(value: str | None) -> datetime | None:

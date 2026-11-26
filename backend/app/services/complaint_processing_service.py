@@ -33,6 +33,7 @@ from app.services.conversation_service import (
     is_greeting_reply,
 )
 from app.services.user_service import get_or_create_user
+from app.services.whatsapp_inbox_service import lock_inbound_event_claim
 from app.services.whatsapp_media_service import (
     WhatsAppMediaDownload,
     WhatsAppMediaDownloadError,
@@ -363,15 +364,53 @@ async def process_incoming_message(
     message: IncomingWhatsAppMessage,
     *,
     now: datetime | None = None,
+    inbox_event_id: uuid.UUID | None = None,
+    worker_id: str | None = None,
 ) -> ComplaintProcessingResult:
     downloaded_media: WhatsAppMediaDownload | None = None
     processing_time = now or datetime.now(UTC)
     if processing_time.tzinfo is None or processing_time.utcoffset() is None:
         raise ValueError("now must be a timezone-aware datetime")
     processing_time = processing_time.astimezone(UTC)
+    if (inbox_event_id is None) != (worker_id is None):
+        raise ValueError("inbox_event_id and worker_id must be provided together")
 
     try:
+        if message.message_type in {MessageKind.IMAGE, MessageKind.AUDIO}:
+            if inbox_event_id is not None and worker_id is not None:
+                lock_inbound_event_claim(
+                    db,
+                    event_id=inbox_event_id,
+                    worker_id=worker_id,
+                )
+
+            existing_message = _get_existing_message(
+                db=db,
+                whatsapp_message_id=message.whatsapp_message_id,
+            )
+            existing_unsupported_message = _get_existing_unsupported_message(
+                db=db,
+                whatsapp_message_id=message.whatsapp_message_id,
+            )
+            db.commit()
+
+            if existing_message is None and existing_unsupported_message is None:
+                if message.media_id is None:
+                    raise ValueError("Media messages require a WhatsApp media ID")
+
+                downloaded_media = await download_whatsapp_media(
+                    message.media_id,
+                    expected_mime_type=message.media_mime_type,
+                )
+
         # 1. Get or create the user and lock their row.
+        if inbox_event_id is not None and worker_id is not None:
+            lock_inbound_event_claim(
+                db,
+                event_id=inbox_event_id,
+                worker_id=worker_id,
+            )
+
         user = _get_locked_user(
             db=db,
             whatsapp_number=message.whatsapp_number,
@@ -421,18 +460,7 @@ async def process_incoming_message(
         if complaint is None and not is_unsupported:
             raise RuntimeError("Expected an active complaint for a supported message")
 
-        # 5. Download media only after the duplicate check, while the
-        # user's row lock prevents duplicate deliveries from downloading twice.
-        if message.message_type in {MessageKind.IMAGE, MessageKind.AUDIO}:
-            if message.media_id is None:
-                raise ValueError("Media messages require a WhatsApp media ID")
-
-            downloaded_media = await download_whatsapp_media(
-                message.media_id,
-                expected_mime_type=message.media_mime_type,
-            )
-
-        # 6. Classify the incoming message.
+        # 5. Classify the incoming message.
         event = (
             None
             if is_unsupported

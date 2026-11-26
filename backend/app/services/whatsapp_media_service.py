@@ -45,6 +45,14 @@ SUPPORTED_MEDIA_MIME_TYPES = frozenset(_SUPPORTED_TYPES)
 class WhatsAppMediaDownloadError(Exception):
     """Raised when WhatsApp media cannot be safely downloaded and stored."""
 
+    retryable = False
+
+
+class WhatsAppMediaTransientError(WhatsAppMediaDownloadError):
+    """Raised for media failures that may resolve on a later attempt."""
+
+    retryable = True
+
 
 @dataclass(frozen=True)
 class WhatsAppMediaDownload:
@@ -178,13 +186,18 @@ async def _lookup_media(
         response = await client.get(lookup_url, headers=headers)
         response.raise_for_status()
     except httpx.TimeoutException as err:
-        raise WhatsAppMediaDownloadError("WhatsApp media lookup timed out") from err
+        raise WhatsAppMediaTransientError("WhatsApp media lookup timed out") from err
     except httpx.HTTPStatusError as err:
-        raise WhatsAppMediaDownloadError(
+        error_type = (
+            WhatsAppMediaTransientError
+            if err.response.status_code in {408, 429} or err.response.status_code >= 500
+            else WhatsAppMediaDownloadError
+        )
+        raise error_type(
             f"WhatsApp media lookup failed with HTTP {err.response.status_code}"
         ) from err
     except httpx.RequestError as err:
-        raise WhatsAppMediaDownloadError(
+        raise WhatsAppMediaTransientError(
             "Could not connect to WhatsApp media lookup"
         ) from err
 
@@ -283,7 +296,13 @@ async def download_whatsapp_media(
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as err:
-                    raise WhatsAppMediaDownloadError(
+                    error_type = (
+                        WhatsAppMediaTransientError
+                        if err.response.status_code in {408, 429}
+                        or err.response.status_code >= 500
+                        else WhatsAppMediaDownloadError
+                    )
+                    raise error_type(
                         f"WhatsApp media download failed with HTTP "
                         f"{err.response.status_code}"
                     ) from err
@@ -355,13 +374,13 @@ async def download_whatsapp_media(
     except WhatsAppMediaDownloadError:
         raise
     except httpx.TimeoutException as err:
-        raise WhatsAppMediaDownloadError("WhatsApp media download timed out") from err
+        raise WhatsAppMediaTransientError("WhatsApp media download timed out") from err
     except httpx.RequestError as err:
-        raise WhatsAppMediaDownloadError(
+        raise WhatsAppMediaTransientError(
             "Could not connect to WhatsApp media download"
         ) from err
     except OSError as err:
-        raise WhatsAppMediaDownloadError(
+        raise WhatsAppMediaTransientError(
             "Could not store WhatsApp media locally"
         ) from err
     finally:
@@ -369,7 +388,7 @@ async def download_whatsapp_media(
             try:
                 temporary_path.unlink(missing_ok=True)
             except OSError as err:
-                raise WhatsAppMediaDownloadError(
+                raise WhatsAppMediaTransientError(
                     "Could not remove temporary WhatsApp media file"
                 ) from err
 

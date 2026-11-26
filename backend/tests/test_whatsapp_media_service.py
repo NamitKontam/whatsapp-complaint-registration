@@ -111,7 +111,7 @@ def test_media_lookup_http_failure_leaves_no_files(monkeypatch, tmp_path):
     with pytest.raises(
         media_service.WhatsAppMediaDownloadError,
         match="lookup failed with HTTP 401",
-    ):
+    ) as exc_info:
         asyncio.run(
             media_service.download_whatsapp_media(
                 "media123",
@@ -119,6 +119,10 @@ def test_media_lookup_http_failure_leaves_no_files(monkeypatch, tmp_path):
             )
         )
 
+    assert not isinstance(
+        exc_info.value,
+        media_service.WhatsAppMediaTransientError,
+    )
     assert list(tmp_path.iterdir()) == []
 
 
@@ -131,7 +135,7 @@ def test_media_lookup_timeout_is_reported(monkeypatch, tmp_path):
     with pytest.raises(
         media_service.WhatsAppMediaDownloadError,
         match="lookup timed out",
-    ):
+    ) as exc_info:
         asyncio.run(
             media_service.download_whatsapp_media(
                 "media123",
@@ -139,6 +143,7 @@ def test_media_lookup_timeout_is_reported(monkeypatch, tmp_path):
             )
         )
 
+    assert isinstance(exc_info.value, media_service.WhatsAppMediaTransientError)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -157,7 +162,7 @@ def test_media_download_http_failure_leaves_no_files(monkeypatch, tmp_path):
     with pytest.raises(
         media_service.WhatsAppMediaDownloadError,
         match="download failed with HTTP 503",
-    ):
+    ) as exc_info:
         asyncio.run(
             media_service.download_whatsapp_media(
                 "media123",
@@ -165,6 +170,7 @@ def test_media_download_http_failure_leaves_no_files(monkeypatch, tmp_path):
             )
         )
 
+    assert isinstance(exc_info.value, media_service.WhatsAppMediaTransientError)
     assert list(tmp_path.iterdir()) == []
 
 
