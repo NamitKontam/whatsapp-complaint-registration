@@ -23,6 +23,9 @@ from app.services.conversation_service import (
         ("No", ConversationEvent.NO),
         ("no", ConversationEvent.NO),
         ("N", ConversationEvent.NO),
+        ("hi", ConversationEvent.MESSAGE_RECEIVED),
+        ("Hello!", ConversationEvent.MESSAGE_RECEIVED),
+        (" hey ", ConversationEvent.MESSAGE_RECEIVED),
         ("No water supply", ConversationEvent.MESSAGE_RECEIVED),
         ("Yesterday there was leakage", ConversationEvent.MESSAGE_RECEIVED),
     ],
@@ -81,8 +84,8 @@ def test_invalid_transition_raises_error():
 @pytest.mark.parametrize(
     ("reply_id", "expected_event"),
     [
-        ("complaint_yes", ConversationEvent.YES),
-        ("complaint_no", ConversationEvent.NO),
+        ("complaint_add_more", ConversationEvent.YES),
+        ("complaint_submit", ConversationEvent.NO),
         ("unknown_option", ConversationEvent.MESSAGE_RECEIVED),
     ],
 )

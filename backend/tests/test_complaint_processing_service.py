@@ -80,6 +80,9 @@ def create_incoming_message(
         ("No", ConversationEvent.NO),
         ("no", ConversationEvent.NO),
         ("N", ConversationEvent.NO),
+        ("hi", ConversationEvent.MESSAGE_RECEIVED),
+        ("hello", ConversationEvent.MESSAGE_RECEIVED),
+        ("hey", ConversationEvent.MESSAGE_RECEIVED),
         ("My street has a water leak", ConversationEvent.MESSAGE_RECEIVED),
     ],
 )
@@ -95,8 +98,8 @@ def test_classify_text_message(text, expected_event):
 @pytest.mark.parametrize(
     ("reply_id", "expected_event"),
     [
-        ("complaint_yes", ConversationEvent.YES),
-        ("complaint_no", ConversationEvent.NO),
+        ("complaint_add_more", ConversationEvent.YES),
+        ("complaint_submit", ConversationEvent.NO),
         ("unknown_id", ConversationEvent.MESSAGE_RECEIVED),
     ],
 )

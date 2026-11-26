@@ -25,6 +25,20 @@ def classify_reply(text: str) -> ConversationEvent:
     return ConversationEvent.MESSAGE_RECEIVED
 
 
+def classify_interactive_reply(
+    reply: InteractiveReply,
+) -> ConversationEvent:
+    """Classify a WhatsApp interactive reply using its stable ID."""
+
+    if reply.reply_id == "complaint_add_more":
+        return ConversationEvent.YES
+
+    if reply.reply_id == "complaint_submit":
+        return ConversationEvent.NO
+
+    return ConversationEvent.MESSAGE_RECEIVED
+
+
 def get_next_conversation_state(
     current_state: ConversationState,
     event: ConversationEvent,
@@ -54,17 +68,3 @@ def get_next_conversation_state(
     raise ValueError(
         f"Invalid event {event.value} for state {current_state.value}"
     )
-
-
-def classify_interactive_reply(
-    reply: InteractiveReply,
-) -> ConversationEvent:
-    """Classify a WhatsApp interactive reply using its stable ID."""
-
-    if reply.reply_id == "complaint_yes":
-        return ConversationEvent.YES
-
-    if reply.reply_id == "complaint_no":
-        return ConversationEvent.NO
-
-    return ConversationEvent.MESSAGE_RECEIVED
