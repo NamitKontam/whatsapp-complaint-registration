@@ -42,6 +42,8 @@ def _current_message_has_meaningful_details(
         return False
 
     message = result.message
+    if message is None:
+        return False
 
     if message.message_type == MessageType.TEXT:
         return bool(message.text_content and message.text_content.strip())
@@ -63,7 +65,33 @@ def get_whatsapp_reply(
     if result.is_duplicate:
         return None
 
+    if result.is_unsupported:
+        return _with_media_guidance(
+            "I can't process that message type. Please send text, a photo/image, "
+            "an audio/voice message, or a location."
+        )
+
+    if result.is_ambiguous_reply:
+        return InteractiveWhatsAppReply(
+            body=_with_media_guidance(
+                "Would you like to add more details, or submit your complaint? "
+                "Please choose one."
+            ),
+            buttons=(
+                {
+                    "id": "complaint_add_more",
+                    "title": "Yes, add details",
+                },
+                {
+                    "id": "complaint_submit",
+                    "title": "No, submit",
+                },
+            ),
+        )
+
     if result.submitted:
+        if result.complaint is None:
+            raise RuntimeError("Submitted result has no complaint")
         complaint_number = result.complaint.complaint_number
 
         return (
@@ -78,6 +106,8 @@ def get_whatsapp_reply(
         )
 
     if result.is_greeting:
+        if result.complaint is None:
+            raise RuntimeError("Greeting result has no complaint")
         if (
             result.complaint.conversation_state
             == ConversationState.AWAITING_ADDITIONAL_INFO

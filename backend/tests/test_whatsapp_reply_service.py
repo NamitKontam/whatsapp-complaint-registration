@@ -20,6 +20,8 @@ def make_result(
     is_duplicate: bool = False,
     submitted: bool = False,
     needs_more_information: bool = False,
+    is_unsupported: bool = False,
+    is_ambiguous_reply: bool = False,
     complaint_number: str | None = "CMP-0001",
     message=None,
 ) -> ComplaintProcessingResult:
@@ -35,6 +37,8 @@ def make_result(
         is_duplicate=is_duplicate,
         submitted=submitted,
         needs_more_information=needs_more_information,
+        is_unsupported=is_unsupported,
+        is_ambiguous_reply=is_ambiguous_reply,
     )
 
 
@@ -136,3 +140,30 @@ def test_ordinary_message_returns_acknowledgement():
 
     assert "Thank you for your message" in reply
     assert "complaint" in reply
+
+
+def test_unsupported_message_explains_supported_inputs():
+    result = make_result(is_unsupported=True)
+
+    reply = get_whatsapp_reply(result)
+
+    assert isinstance(reply, str)
+    assert "can't process that message type" in reply
+    assert "text" in reply
+    assert "photo/image" in reply
+    assert "audio/voice" in reply
+    assert "location" in reply
+
+
+def test_ambiguous_reply_asks_user_to_choose_existing_buttons():
+    result = make_result(is_ambiguous_reply=True)
+
+    reply = get_whatsapp_reply(result)
+
+    assert isinstance(reply, InteractiveWhatsAppReply)
+    assert "add more details" in reply.body
+    assert "submit your complaint" in reply.body
+    assert reply.buttons == (
+        {"id": "complaint_add_more", "title": "Yes, add details"},
+        {"id": "complaint_submit", "title": "No, submit"},
+    )

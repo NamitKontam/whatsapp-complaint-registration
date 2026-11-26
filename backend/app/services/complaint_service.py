@@ -1,4 +1,3 @@
-
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import UUID, func, or_, select, text
@@ -24,11 +23,11 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def get_or_create_active_complaint(
+def get_active_complaint(
     db: Session,
     user_id: UUID,
     now: datetime | None = None,
-) -> Complaint:
+) -> Complaint | None:
     current_time = now or datetime.now(UTC)
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ValueError("now must be a timezone-aware datetime")
@@ -53,6 +52,18 @@ def get_or_create_active_complaint(
 
         active_complaint.status = ComplaintStatus.ABANDONED
         db.flush()
+
+    return None
+
+
+def get_or_create_active_complaint(
+    db: Session,
+    user_id: UUID,
+    now: datetime | None = None,
+) -> Complaint:
+    active_complaint = get_active_complaint(db, user_id, now)
+    if active_complaint is not None:
+        return active_complaint
 
     statement = (
         insert(Complaint)
@@ -101,39 +112,43 @@ def has_meaningful_complaint_message(
         )
     )
 
-    statement = select(ComplaintMessage.id).where(
-        ComplaintMessage.complaint_id == complaint_id,
-        or_(
-            # Non-empty text message that is not a conversation command
-            (
-                (ComplaintMessage.message_type == MessageType.TEXT)
-                & (
-                    func.regexp_replace(
-                        ComplaintMessage.text_content,
-                        r"\s",
-                        "",
-                        "g",
+    statement = (
+        select(ComplaintMessage.id)
+        .where(
+            ComplaintMessage.complaint_id == complaint_id,
+            or_(
+                # Non-empty text message that is not a conversation command
+                (
+                    (ComplaintMessage.message_type == MessageType.TEXT)
+                    & (
+                        func.regexp_replace(
+                            ComplaintMessage.text_content,
+                            r"\s",
+                            "",
+                            "g",
+                        )
+                        != ""
                     )
-                    != ""
-                )
-                & normalized_text.notin_(("yes", "y", "no", "n"))
-                & ComplaintMessage.text_content.is_not(None)
+                    & normalized_text.notin_(("yes", "y", "no", "n"))
+                    & ComplaintMessage.text_content.is_not(None)
+                ),
+                # Image or audio with a media ID
+                (
+                    ComplaintMessage.message_type.in_(
+                        [MessageType.IMAGE, MessageType.AUDIO]
+                    )
+                    & ComplaintMessage.media_id.is_not(None)
+                ),
+                # Location with both coordinates
+                (
+                    (ComplaintMessage.message_type == MessageType.LOCATION)
+                    & ComplaintMessage.latitude.is_not(None)
+                    & ComplaintMessage.longitude.is_not(None)
+                ),
             ),
-            # Image or audio with a media ID
-            (
-                ComplaintMessage.message_type.in_(
-                    [MessageType.IMAGE, MessageType.AUDIO]
-                )
-                & ComplaintMessage.media_id.is_not(None)
-            ),
-            # Location with both coordinates
-            (
-                (ComplaintMessage.message_type == MessageType.LOCATION)
-                & ComplaintMessage.latitude.is_not(None)
-                & ComplaintMessage.longitude.is_not(None)
-            ),
-        ),
-    ).limit(1)
+        )
+        .limit(1)
+    )
 
     return db.scalar(statement) is not None
 
@@ -146,9 +161,7 @@ def submit_complaint(db: Session, complaint: Complaint) -> Complaint:
         raise ValueError("Complaint conversation is already completed")
 
     if not has_meaningful_complaint_message(db, complaint.id):
-        raise ValueError(
-            "Cannot submit a complaint without meaningful information"
-        )
+        raise ValueError("Cannot submit a complaint without meaningful information")
 
     complaint.complaint_number = generate_complaint_number(db)
     complaint.status = ComplaintStatus.SUBMITTED

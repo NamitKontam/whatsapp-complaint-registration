@@ -10,6 +10,7 @@ from app.models.outbound_whatsapp_message import (
     OutboundMessageStatus,
     OutboundWhatsAppMessage,
 )
+from app.models.unsupported_whatsapp_message import UnsupportedWhatsAppMessage
 from app.models.user import User
 from app.schemas.whatsapp_message import (
     IncomingWhatsAppMessage,
@@ -30,7 +31,10 @@ from app.services.complaint_processing_service import (
 from app.services.complaint_processing_service import (
     process_incoming_message as async_process_incoming_message,
 )
-from app.services.complaint_service import get_or_create_active_complaint
+from app.services.complaint_service import (
+    get_or_create_active_complaint,
+    has_meaningful_complaint_message,
+)
 from app.services.conversation_service import ConversationEvent
 from app.services.user_service import get_or_create_user
 from app.services.whatsapp_media_service import (
@@ -100,6 +104,18 @@ def create_interactive_button_message(
     )
 
 
+def create_unsupported_message(
+    whatsapp_message_id: str,
+    whatsapp_number: str = "919876543210",
+) -> IncomingWhatsAppMessage:
+    return create_incoming_message(
+        MessageKind.UNSUPPORTED,
+        whatsapp_number=whatsapp_number,
+        whatsapp_message_id=whatsapp_message_id,
+        raw_type="sticker",
+    )
+
+
 @pytest.mark.parametrize(
     ("text", "expected_event"),
     [
@@ -143,6 +159,165 @@ def test_classify_interactive_message(reply_id, expected_event):
     )
 
     assert _classify_message_event(message) == expected_event
+
+
+@pytest.mark.parametrize(
+    "conversation_state",
+    [
+        ConversationState.AWAITING_COMPLAINT,
+        ConversationState.ASKING_FOR_MORE_INFO,
+        ConversationState.AWAITING_ADDITIONAL_INFO,
+    ],
+)
+def test_unsupported_message_preserves_active_draft_state(
+    db_session,
+    conversation_state,
+):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    complaint.created_at = base_time
+    complaint.last_activity_at = base_time
+    complaint.conversation_state = conversation_state
+    db_session.flush()
+    existing_message = None
+    if conversation_state != ConversationState.AWAITING_COMPLAINT:
+        existing_message = ComplaintMessage(
+            complaint_id=complaint.id,
+            whatsapp_message_id=f"wamid.unsupported-history-{conversation_state.value}",
+            message_type=MessageType.TEXT,
+            text_content="Previously reported issue.",
+        )
+        db_session.add(existing_message)
+        db_session.flush()
+    had_meaningful_details = has_meaningful_complaint_message(
+        db_session,
+        complaint.id,
+    )
+
+    result = process_incoming_message(
+        db=db_session,
+        message=create_unsupported_message("wamid.unsupported-active"),
+        now=base_time + timedelta(hours=1),
+    )
+
+    assert result.complaint.id == complaint.id
+    assert result.is_unsupported is True
+    assert result.event is None
+    assert result.submitted is False
+    assert result.complaint.status == ComplaintStatus.DRAFT
+    assert result.complaint.conversation_state == conversation_state
+    assert result.complaint.last_activity_at == base_time
+    assert result.message.message_type == MessageType.OTHER
+    assert result.message.text_content is None
+    assert result.message.media_id is None
+    assert (
+        has_meaningful_complaint_message(db_session, complaint.id)
+        is had_meaningful_details
+    )
+    if existing_message is not None:
+        assert db_session.get(ComplaintMessage, existing_message.id).text_content == (
+            "Previously reported issue."
+        )
+
+    reply = get_whatsapp_reply(result)
+    assert isinstance(reply, str)
+    assert "text" in reply
+    assert "photo/image" in reply
+    assert "audio/voice" in reply
+    assert "location" in reply
+    assert db_session.query(Complaint).filter(Complaint.user_id == user.id).count() == 1
+    assert (
+        db_session.query(OutboundWhatsAppMessage)
+        .filter_by(inbound_message_id=result.message.id)
+        .count()
+        == 1
+    )
+
+
+def test_unsupported_message_without_draft_uses_unlinked_outbox(db_session):
+    result = process_incoming_message(
+        db=db_session,
+        message=create_unsupported_message("wamid.unsupported-no-draft"),
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    unsupported_message = db_session.query(UnsupportedWhatsAppMessage).one()
+    outbound_message = db_session.query(OutboundWhatsAppMessage).one()
+
+    assert result.complaint is None
+    assert result.message is None
+    assert result.is_unsupported is True
+    assert unsupported_message.user_id == result.user.id
+    assert unsupported_message.raw_type == "sticker"
+    assert outbound_message.inbound_message_id is None
+    assert outbound_message.complaint_id is None
+    assert outbound_message.unsupported_inbound_message_id == unsupported_message.id
+    assert db_session.query(Complaint).count() == 0
+
+    duplicate_result = process_incoming_message(
+        db=db_session,
+        message=create_unsupported_message("wamid.unsupported-no-draft"),
+        now=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=1),
+    )
+
+    assert duplicate_result.is_duplicate is True
+    assert duplicate_result.unsupported_inbound_message_id == unsupported_message.id
+    assert get_whatsapp_reply(duplicate_result) is None
+    assert db_session.query(UnsupportedWhatsAppMessage).count() == 1
+    assert db_session.query(OutboundWhatsAppMessage).count() == 1
+    assert db_session.query(Complaint).count() == 0
+
+
+def test_unsupported_message_does_not_create_replacement_for_expired_draft(
+    db_session,
+):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Water is leaking on my street.",
+            whatsapp_message_id="wamid.unsupported-expiry-details",
+        ),
+        now=base_time,
+    )
+    first_result.complaint.created_at = base_time
+    first_result.complaint.last_activity_at = base_time
+    db_session.flush()
+
+    result = process_incoming_message(
+        db=db_session,
+        message=create_unsupported_message("wamid.unsupported-expiry"),
+        now=base_time + timedelta(hours=24),
+    )
+
+    assert result.complaint is None
+    assert first_result.complaint.status == ComplaintStatus.ABANDONED
+    assert db_session.query(Complaint).count() == 1
+    assert db_session.query(UnsupportedWhatsAppMessage).count() == 1
+
+
+def test_unsupported_duplicate_id_cannot_cross_users(db_session):
+    process_incoming_message(
+        db=db_session,
+        message=create_unsupported_message(
+            "wamid.unsupported-cross-user",
+            "919876543210",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="another user"):
+        process_incoming_message(
+            db=db_session,
+            message=create_unsupported_message(
+                "wamid.unsupported-cross-user",
+                "919876543211",
+            ),
+        )
+
+    assert db_session.query(UnsupportedWhatsAppMessage).count() == 1
+    assert db_session.query(Complaint).count() == 0
 
 
 def test_image_caption_no_is_not_a_submission_command():
@@ -978,6 +1153,276 @@ def test_expiry_for_one_user_does_not_affect_another_users_draft(db_session):
     assert second_user_result.complaint.status == ComplaintStatus.DRAFT
     assert replacement_result.complaint.user_id == first_user_result.user.id
     assert replacement_result.complaint.id != first_user_result.complaint.id
+
+
+@pytest.mark.parametrize(
+    ("reply_text", "expected_event", "expected_state", "submitted"),
+    [
+        (
+            "Yeah",
+            ConversationEvent.YES,
+            ConversationState.AWAITING_ADDITIONAL_INFO,
+            False,
+        ),
+        (
+            "yep",
+            ConversationEvent.YES,
+            ConversationState.AWAITING_ADDITIONAL_INFO,
+            False,
+        ),
+        (
+            "Sure!",
+            ConversationEvent.YES,
+            ConversationState.AWAITING_ADDITIONAL_INFO,
+            False,
+        ),
+        (
+            "OK",
+            ConversationEvent.YES,
+            ConversationState.AWAITING_ADDITIONAL_INFO,
+            False,
+        ),
+        (
+            "okay.",
+            ConversationEvent.YES,
+            ConversationState.AWAITING_ADDITIONAL_INFO,
+            False,
+        ),
+        (
+            "Nope",
+            ConversationEvent.NO,
+            ConversationState.COMPLETED,
+            True,
+        ),
+    ],
+)
+def test_common_typed_replies_work_in_add_more_decision_state(
+    db_session,
+    reply_text,
+    expected_event,
+    expected_state,
+    submitted,
+):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="The streetlight is not working.",
+            whatsapp_message_id=f"wamid.variant-details-{reply_text}",
+        ),
+        now=base_time,
+    )
+    reply_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content=reply_text,
+            whatsapp_message_id=f"wamid.variant-reply-{reply_text}",
+        ),
+        now=base_time + timedelta(hours=1),
+    )
+
+    assert reply_result.event == expected_event
+    assert reply_result.submitted is submitted
+    assert reply_result.complaint.conversation_state == expected_state
+    assert reply_result.complaint.last_activity_at == base_time
+    assert reply_result.complaint.id == first_result.complaint.id
+
+
+@pytest.mark.parametrize("reply_text", ["Maybe", "Not sure!", " unsure "])
+def test_ambiguous_short_reply_clarifies_without_changing_draft(
+    db_session,
+    reply_text,
+):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="The streetlight is not working.",
+            whatsapp_message_id=f"wamid.ambiguous-details-{reply_text}",
+        ),
+        now=base_time,
+    )
+    ambiguous_message = create_incoming_message(
+        MessageKind.TEXT,
+        text_content=reply_text,
+        whatsapp_message_id=f"wamid.ambiguous-reply-{reply_text}",
+    )
+    result = process_incoming_message(
+        db=db_session,
+        message=ambiguous_message,
+        now=base_time + timedelta(hours=1),
+    )
+
+    assert result.is_ambiguous_reply is True
+    assert result.event == ConversationEvent.MESSAGE_RECEIVED
+    assert result.complaint.id == first_result.complaint.id
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+    assert result.complaint.last_activity_at == base_time
+    assert result.message.message_type == MessageType.OTHER
+    assert result.message.text_content == reply_text
+
+    reply = get_whatsapp_reply(result)
+    assert isinstance(reply, InteractiveWhatsAppReply)
+    assert "add more details" in reply.body
+    assert "submit your complaint" in reply.body
+    assert reply.buttons == (
+        {"id": "complaint_add_more", "title": "Yes, add details"},
+        {"id": "complaint_submit", "title": "No, submit"},
+    )
+
+    duplicate_result = process_incoming_message(
+        db=db_session,
+        message=ambiguous_message,
+        now=base_time + timedelta(hours=2),
+    )
+
+    assert duplicate_result.is_duplicate is True
+    assert duplicate_result.complaint.last_activity_at == base_time
+    assert (
+        db_session.query(OutboundWhatsAppMessage)
+        .filter(OutboundWhatsAppMessage.complaint_id == first_result.complaint.id)
+        .count()
+        == 2
+    )
+
+
+def test_maybe_is_complaint_detail_when_not_awaiting_add_more_decision(db_session):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Maybe the road is blocked.",
+            whatsapp_message_id="wamid.maybe-complaint-detail",
+        ),
+        now=base_time,
+    )
+
+    assert result.is_ambiguous_reply is False
+    assert result.event == ConversationEvent.MESSAGE_RECEIVED
+    assert result.message.message_type == MessageType.TEXT
+    assert result.message.text_content == "Maybe the road is blocked."
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+    assert result.complaint.last_activity_at == base_time
+
+
+def test_ordinary_complaint_text_is_not_ambiguous_while_asking_for_more(
+    db_session,
+):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Water is leaking on the main road.",
+            whatsapp_message_id="wamid.ordinary-details-first",
+        ),
+        now=base_time,
+    )
+
+    result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="The streetlight is not working.",
+            whatsapp_message_id="wamid.ordinary-details-second",
+        ),
+        now=base_time + timedelta(hours=1),
+    )
+
+    assert result.is_ambiguous_reply is False
+    assert result.message.message_type == MessageType.TEXT
+    assert result.message.text_content == "The streetlight is not working."
+    assert result.complaint.last_activity_at == base_time + timedelta(hours=1)
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+
+
+@pytest.mark.parametrize(
+    ("message_type", "expected_message_type"),
+    [
+        (MessageKind.TEXT, MessageType.TEXT),
+        (MessageKind.IMAGE, MessageType.IMAGE),
+        (MessageKind.AUDIO, MessageType.AUDIO),
+        (MessageKind.LOCATION, MessageType.LOCATION),
+    ],
+)
+def test_add_more_flow_still_accepts_supported_detail_types(
+    db_session,
+    monkeypatch,
+    message_type,
+    expected_message_type,
+):
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    first_result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            MessageKind.TEXT,
+            text_content="Water is leaking on the main road.",
+            whatsapp_message_id=f"wamid.add-more-first-{message_type.value}",
+        ),
+        now=base_time,
+    )
+    process_incoming_message(
+        db=db_session,
+        message=create_interactive_button_message(
+            "complaint_add_more",
+            f"wamid.add-more-button-{message_type.value}",
+        ),
+        now=base_time + timedelta(hours=1),
+    )
+
+    if message_type in {MessageKind.IMAGE, MessageKind.AUDIO}:
+
+        async def download_media(media_id, *, expected_mime_type):
+            return WhatsAppMediaDownload(
+                storage_key=f"{'c' * 32}.media",
+                media_id=media_id,
+                mime_type=expected_mime_type,
+                size_bytes=64,
+                sha256="c" * 64,
+            )
+
+        monkeypatch.setattr(
+            processing_service,
+            "download_whatsapp_media",
+            download_media,
+        )
+
+    details = {
+        MessageKind.TEXT: {
+            "text_content": "The leak is beside the park entrance.",
+        },
+        MessageKind.IMAGE: {
+            "media_id": "add-more-image",
+            "media_mime_type": "image/jpeg",
+        },
+        MessageKind.AUDIO: {
+            "media_id": "add-more-audio",
+            "media_mime_type": "audio/ogg",
+        },
+        MessageKind.LOCATION: {
+            "latitude": Decimal("17.6599"),
+            "longitude": Decimal("75.9064"),
+        },
+    }[message_type]
+    result = process_incoming_message(
+        db=db_session,
+        message=create_incoming_message(
+            message_type,
+            whatsapp_message_id=f"wamid.add-more-detail-{message_type.value}",
+            **details,
+        ),
+        now=base_time + timedelta(hours=2),
+    )
+
+    assert result.complaint.id == first_result.complaint.id
+    assert result.complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+    assert result.message.message_type == expected_message_type
+    assert result.complaint.last_activity_at == base_time + timedelta(hours=2)
 
 
 def test_process_incoming_message_yes_asks_for_additional_info(

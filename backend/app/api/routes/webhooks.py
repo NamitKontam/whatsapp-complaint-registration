@@ -142,10 +142,20 @@ async def receive_whatsapp_webhook(
 
         # Find the outbox row associated with this inbound message.
         # This also works for duplicate webhook deliveries.
-        outbound_message = db.scalar(
-            select(OutboundWhatsAppMessage).where(
+        if result.message is not None:
+            outbound_filter = (
                 OutboundWhatsAppMessage.inbound_message_id == result.message.id
             )
+        elif result.unsupported_inbound_message_id is not None:
+            outbound_filter = (
+                OutboundWhatsAppMessage.unsupported_inbound_message_id
+                == result.unsupported_inbound_message_id
+            )
+        else:
+            continue
+
+        outbound_message = db.scalar(
+            select(OutboundWhatsAppMessage).where(outbound_filter)
         )
 
         if outbound_message is None:

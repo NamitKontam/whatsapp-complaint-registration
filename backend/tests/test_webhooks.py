@@ -84,9 +84,9 @@ def make_signature(body: bytes) -> str:
     return f"sha256={digest}"
 
 
-def send_webhook(client: TestClient):
+def send_webhook(client: TestClient, payload=PAYLOAD):
     body = json.dumps(
-        PAYLOAD,
+        payload,
         separators=(",", ":"),
     ).encode("utf-8")
 
@@ -166,3 +166,53 @@ def test_webhook_returns_retryable_error_for_media_download_failure(
         "detail": "Incoming WhatsApp media could not be downloaded"
     }
     webhooks.dispatch_outbound_message.assert_not_awaited()
+
+
+def test_duplicate_unlinked_unsupported_webhook_does_not_resend_reply(
+    webhook_client,
+):
+    client, db = webhook_client
+    unsupported_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "919876543210",
+                                    "id": "wamid.unsupported_webhook",
+                                    "timestamp": "1732345678",
+                                    "type": "sticker",
+                                    "sticker": {"id": "sticker-id"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        ],
+    }
+    unsupported_inbound_id = uuid.uuid4()
+    result = SimpleNamespace(
+        message=None,
+        unsupported_inbound_message_id=unsupported_inbound_id,
+    )
+    webhooks.process_incoming_message.side_effect = [result, result]
+    outbound_message = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=OutboundMessageStatus.PENDING,
+    )
+    db.scalar.side_effect = [outbound_message, outbound_message]
+
+    first_response = send_webhook(client, unsupported_payload)
+    outbound_message.status = OutboundMessageStatus.SENT
+    duplicate_response = send_webhook(client, unsupported_payload)
+
+    assert first_response.status_code == 200
+    assert duplicate_response.status_code == 200
+    assert webhooks.dispatch_outbound_message.await_count == 1
+    statement = db.scalar.call_args_list[0].args[0]
+    assert "unsupported_inbound_message_id" in str(statement)

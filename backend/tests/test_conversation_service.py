@@ -1,4 +1,3 @@
-
 import pytest
 
 from app.models.complaint import ConversationState
@@ -32,6 +31,31 @@ from app.services.conversation_service import (
 )
 def test_classify_reply(reply, expected_event):
     assert classify_reply(reply) == expected_event
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected_event"),
+    [
+        (" Yeah! ", ConversationEvent.YES),
+        ("yep", ConversationEvent.YES),
+        ("sure.", ConversationEvent.YES),
+        ("OK", ConversationEvent.YES),
+        ("okay!", ConversationEvent.YES),
+        ("nope", ConversationEvent.NO),
+    ],
+)
+def test_classify_common_variants_when_asked_for_more_info(reply, expected_event):
+    assert classify_reply(reply, allow_common_variants=True) == expected_event
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["maybe", "Not sure!", " unsure "],
+)
+def test_identify_ambiguous_short_replies(reply):
+    from app.services.conversation_service import is_ambiguous_short_reply
+
+    assert is_ambiguous_short_reply(reply)
 
 
 @pytest.mark.parametrize(
@@ -80,6 +104,7 @@ def test_invalid_transition_raises_error():
             ConversationState.AWAITING_COMPLAINT,
             ConversationEvent.NO,
         )
+
 
 @pytest.mark.parametrize(
     ("reply_id", "expected_event"),
