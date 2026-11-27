@@ -234,6 +234,40 @@ def test_parse_whatsapp_payload(
                     ],
                 },
             },
+            "Interactive Message": {
+                "summary": "Sample Interactive Button Reply Message",
+                "value": {
+                    "object": "whatsapp_business_account",
+                    "entry": [
+                        {
+                            "id": "100200300",
+                            "changes": [
+                                {
+                                    "field": "messages",
+                                    "value": {
+                                        "messaging_product": "whatsapp",
+                                        "messages": [
+                                            {
+                                                "from": "919876543210",
+                                                "id": "wamid.interactive12345",
+                                                "timestamp": "1732345681",
+                                                "type": "interactive",
+                                                "interactive": {
+                                                    "type": "button_reply",
+                                                    "button_reply": {
+                                                        "id": "btn_yes",
+                                                        "title": "Yes",
+                                                    },
+                                                },
+                                            }
+                                        ],
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
             "Status Delivery Receipt": {
                 "summary": "Sample Delivery Status Event",
                 "value": {
@@ -274,7 +308,7 @@ def test_parse_whatsapp_payload(
 @router.get(
     "/whatsapp/sample-payload/{message_type}",
     summary="[TEST] Get sample WhatsApp webhook payloads",
-    description="Returns pre-built Meta webhook JSON payloads for 'text', 'image', 'audio', 'location', or 'status'.",
+    description="Returns pre-built Meta webhook JSON payloads for 'text', 'image', 'audio', 'location', 'interactive', or 'status'.",
 )
 def get_sample_payload(message_type: str):
     """Retrieve sample payload JSON for testing."""
@@ -383,6 +417,37 @@ def get_sample_payload(message_type: str):
                                             "longitude": 77.5946,
                                             "name": "Town Hall",
                                             "address": "MG Road, Bengaluru",
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+        "interactive": {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "100200300",
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "messages": [
+                                    {
+                                        "from": "919876543210",
+                                        "id": "wamid.sample_interactive",
+                                        "timestamp": "1732345682",
+                                        "type": "interactive",
+                                        "interactive": {
+                                            "type": "button_reply",
+                                            "button_reply": {
+                                                "id": "btn_yes",
+                                                "title": "Yes",
+                                            },
                                         },
                                     }
                                 ],
