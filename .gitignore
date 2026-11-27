@@ -27,6 +27,7 @@ htmlcov/
 
 # Local media storage
 storage/media/
+backend/storage/
 
 # IDE
 .idea/
