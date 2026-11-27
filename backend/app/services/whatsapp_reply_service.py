@@ -26,9 +26,9 @@ def _with_media_guidance(message: str) -> str:
     guidance = get_media_upload_guidance(get_settings())
     return (
         f"{message}\n\n"
-        "You can provide text, a photo/image, an audio/voice message, "
-        "or a location. "
-        f"{guidance.format_message()}"
+        "📎 You can provide text 💬, a photo/image 📸, an audio/voice message 🎙️, "
+        "or a location 📍.\n"
+        f"ℹ️ {guidance.format_message()}"
     )
 
 
@@ -67,14 +67,14 @@ def get_whatsapp_reply(
 
     if result.is_unsupported:
         return _with_media_guidance(
-            "I can't process that message type. Please send text, a photo/image, "
+            "⚠️ I can't process that message type. Please send text, a photo/image, "
             "an audio/voice message, or a location."
         )
 
     if result.is_ambiguous_reply:
         return InteractiveWhatsAppReply(
             body=_with_media_guidance(
-                "Would you like to add more details, or submit your complaint? "
+                "🤔 Would you like to add more details, or submit your complaint? "
                 "Please choose one."
             ),
             buttons=(
@@ -95,14 +95,14 @@ def get_whatsapp_reply(
         complaint_number = result.complaint.complaint_number
 
         return (
-            "Your complaint has been registered successfully. "
-            f"Your complaint number is {complaint_number}."
+            "🎉 Your complaint has been registered successfully! ✅\n"
+            f"Your complaint number is {complaint_number}. We are working on it! 📋"
         )
 
     if result.needs_more_information:
         return _with_media_guidance(
-            "We need more information to register your complaint. "
-            "Please describe the issue in detail."
+            "🔍 We need more information to register your complaint. "
+            "Please describe the issue in detail so we can help. ✍️"
         )
 
     if result.is_greeting:
@@ -113,7 +113,7 @@ def get_whatsapp_reply(
             == ConversationState.AWAITING_ADDITIONAL_INFO
         ):
             return _with_media_guidance(
-                "Hello! Please send the additional information about your complaint."
+                "Hello! Please send the additional information about your complaint. 📄"
             )
 
         if (
@@ -121,28 +121,28 @@ def get_whatsapp_reply(
             == ConversationState.ASKING_FOR_MORE_INFO
         ):
             return _with_media_guidance(
-                "Hello! Please continue sharing the details of your complaint."
+                "Hello! Please continue sharing the details of your complaint. 💬"
             )
 
         return _with_media_guidance(
-            "Hello! Please describe the issue you want to report."
+            "Hello! Please describe the issue you want to report. 👋"
         )
 
     if result.event == ConversationEvent.YES:
         return _with_media_guidance(
-            "Please send the additional information about your complaint."
+            "👍 Please send the additional information about your complaint. 📄"
         )
 
     if result.event == ConversationEvent.NO:
         return _with_media_guidance(
-            "Your complaint could not be registered yet. "
-            "Please provide more details about the issue."
+            "ℹ️ Your complaint could not be registered yet. "
+            "Please provide more details about the issue so we can help. ✍️"
         )
 
     if _current_message_has_meaningful_details(result):
         return InteractiveWhatsAppReply(
             body=_with_media_guidance(
-                "Would you like to add more details to your complaint?"
+                "Would you like to add more details to your complaint? 🤔"
             ),
             buttons=(
                 {
@@ -157,6 +157,6 @@ def get_whatsapp_reply(
         )
 
     return _with_media_guidance(
-        "Thank you for your message. "
-        "Please continue sharing the details of your complaint."
+        "🙏 Thank you for your message! "
+        "Please continue sharing the details of your complaint. 💬"
     )

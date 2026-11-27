@@ -796,7 +796,7 @@ def test_greeting_starts_new_conversation_without_complaint_details(
     assert result.message.text_content is None
     greeting_reply = get_whatsapp_reply(result)
     assert greeting_reply.startswith(
-        "Hello! Please describe the issue you want to report."
+        "Hello! 👋 Please describe the issue you want to report."
     )
     assert "photo/image" in greeting_reply
     assert "audio/voice message" in greeting_reply
@@ -909,7 +909,7 @@ def test_greeting_after_submission_starts_a_new_draft(
     )
     assert greeting_result.message.text_content is None
     assert get_whatsapp_reply(greeting_result).startswith(
-        "Hello! Please describe the issue you want to report."
+        "Hello! 👋 Please describe the issue you want to report."
     )
 
 
@@ -1016,7 +1016,7 @@ def test_greeting_after_expiry_starts_a_fresh_draft(db_session):
     assert greeting_result.complaint.last_activity_at is None
     assert greeting_result.message.text_content is None
     assert get_whatsapp_reply(greeting_result).startswith(
-        "Hello! Please describe the issue you want to report."
+        "Hello! 👋 Please describe the issue you want to report."
     )
 
 
