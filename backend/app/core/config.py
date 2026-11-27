@@ -1,7 +1,7 @@
-
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,62 @@ class Settings(BaseSettings):
 
     # Media storage
     media_storage_dir: Path = Path("storage/media")
+    whatsapp_media_max_size_bytes: int = Field(
+        default=5_000_000,
+        gt=0,
+    )
+
+    complaint_draft_expiry_hours: int = Field(
+        default=24,
+        gt=0,
+    )
+
+    whatsapp_outbox_max_attempts: int = Field(
+        default=5,
+        gt=0,
+        le=100,
+    )
+    whatsapp_outbox_retry_base_seconds: int = Field(
+        default=30,
+        gt=0,
+        le=86400,
+    )
+    whatsapp_outbox_retry_max_seconds: int = Field(
+        default=3600,
+        gt=0,
+        le=86400,
+    )
+    whatsapp_outbox_poll_interval_seconds: int = Field(
+        default=5,
+        gt=0,
+        le=3600,
+    )
+
+    whatsapp_inbox_max_attempts: int = Field(
+        default=5,
+        gt=0,
+        le=100,
+    )
+    whatsapp_inbox_retry_base_seconds: int = Field(
+        default=30,
+        gt=0,
+        le=86400,
+    )
+    whatsapp_inbox_retry_max_seconds: int = Field(
+        default=3600,
+        gt=0,
+        le=86400,
+    )
+    whatsapp_inbox_poll_interval_seconds: int = Field(
+        default=5,
+        gt=0,
+        le=3600,
+    )
+    whatsapp_inbox_lease_seconds: int = Field(
+        default=300,
+        gt=0,
+        le=86400,
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,8 +1,11 @@
 from datetime import UTC, datetime
 from decimal import Decimal
+
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from app.main import app
 from app.schemas.whatsapp_message import (
     IncomingWhatsAppMessage,
     InteractiveReply,
@@ -11,7 +14,6 @@ from app.schemas.whatsapp_message import (
 )
 from app.services.whatsapp_payload_service import (
     NormalizedStatus,
-    ParsedWebhookPayload,
     PayloadValidationError,
     UnsupportedMessageTypeError,
     extract_messages,
@@ -563,6 +565,8 @@ def test_naive_timestamp_string_rejected():
     [
         (Decimal("95.0"), Decimal("77.0"), "Latitude must be between -90 and 90"),
         (Decimal("-95.0"), Decimal("77.0"), "Latitude must be between -90 and 90"),
+        (Decimal("NaN"), Decimal("77.0"), "finite number"),
+        (Decimal("12.0"), Decimal("Infinity"), "finite number"),
         (Decimal("12.0"), Decimal("185.0"), "Longitude must be between -180 and 180"),
         (Decimal("12.0"), Decimal("-185.0"), "Longitude must be between -180 and 180"),
     ],
@@ -687,8 +691,6 @@ def test_extract_messages_omits_unsupported_when_requested():
 
 
 def test_test_parser_endpoint_integration():
-    from app.api.routes.webhooks import test_parse_whatsapp_payload
-
     raw_message = {
         "from": "919876543210",
         "id": "wamid.api001",
@@ -696,42 +698,19 @@ def test_test_parser_endpoint_integration():
         "type": "text",
         "text": {"body": "Testing endpoint"},
     }
+
     payload = _build_meta_payload(messages=[raw_message])
-    result = test_parse_whatsapp_payload(payload)
-    assert isinstance(result, ParsedWebhookPayload)
-    assert len(result.messages) == 1
-    assert result.messages[0].whatsapp_number == "919876543210"
-    assert result.messages[0].message_type == MessageKind.TEXT
-    assert result.messages[0].text_content == "Testing endpoint"
 
+    client = TestClient(app)
+    response = client.post(
+        "/api/webhooks/whatsapp/test-parser",
+        json=payload,
+    )
 
-@pytest.mark.parametrize(
-    "sample_type,expected_kind",
-    [
-        ("text", MessageKind.TEXT),
-        ("image", MessageKind.IMAGE),
-        ("audio", MessageKind.AUDIO),
-        ("location", MessageKind.LOCATION),
-        ("interactive", MessageKind.INTERACTIVE),
-    ],
-)
-def test_sample_payloads_parse_successfully(sample_type, expected_kind):
-    from app.api.routes.webhooks import get_sample_payload
+    assert response.status_code == 200
 
-    payload = get_sample_payload(sample_type)
-    parsed = parse_webhook_payload(payload)
-    assert len(parsed.messages) == 1
-    assert parsed.messages[0].message_type == expected_kind
-
-
-def test_status_sample_payload_parses_successfully():
-    from app.api.routes.webhooks import get_sample_payload
-
-    payload = get_sample_payload("status")
-    parsed = parse_webhook_payload(payload)
-    assert len(parsed.messages) == 0
-    assert len(parsed.statuses) == 1
-    assert parsed.statuses[0].status == "delivered"
-
-
-
+    data = response.json()
+    assert len(data["messages"]) == 1
+    assert data["messages"][0]["whatsapp_number"] == "919876543210"
+    assert data["messages"][0]["message_type"] == "TEXT"
+    assert data["messages"][0]["text_content"] == "Testing endpoint"

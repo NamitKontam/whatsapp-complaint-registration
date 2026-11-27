@@ -1,4 +1,3 @@
-
 from enum import Enum
 
 from app.models.complaint import ConversationState
@@ -11,15 +10,54 @@ class ConversationEvent(str, Enum):
     NO = "NO"
 
 
-def classify_reply(text: str) -> ConversationEvent:
+def _normalize_reply(text: str) -> str:
+    return text.strip().casefold().strip(" \t\n\r.,!?")
+
+
+def classify_reply(
+    text: str,
+    *,
+    allow_common_variants: bool = False,
+) -> ConversationEvent:
     """Identify a simple Yes or No response."""
 
-    normalized_text = text.strip().casefold().strip(" \t\n\r.,!?")
+    normalized_text = _normalize_reply(text)
+    affirmative_replies = {"yes", "y"}
+    negative_replies = {"no", "n"}
 
-    if normalized_text in {"yes", "y"}:
+    if allow_common_variants:
+        affirmative_replies.update({"yeah", "yep", "sure"})
+        negative_replies.add("nope")
+
+    if normalized_text in affirmative_replies:
         return ConversationEvent.YES
 
-    if normalized_text in {"no", "n"}:
+    if normalized_text in negative_replies:
+        return ConversationEvent.NO
+
+    return ConversationEvent.MESSAGE_RECEIVED
+
+
+def is_ambiguous_short_reply(text: str) -> bool:
+    return _normalize_reply(text) in {"maybe", "not sure", "unsure", "ok", "okay"}
+
+
+def is_greeting_reply(text: str) -> bool:
+    """Identify common greetings without assigning them a conversation event."""
+
+    normalized_text = _normalize_reply(text)
+    return normalized_text in {"hi", "hello", "hey"}
+
+
+def classify_interactive_reply(
+    reply: InteractiveReply,
+) -> ConversationEvent:
+    """Classify a WhatsApp interactive reply using its stable ID."""
+
+    if reply.reply_id == "complaint_add_more":
+        return ConversationEvent.YES
+
+    if reply.reply_id == "complaint_submit":
         return ConversationEvent.NO
 
     return ConversationEvent.MESSAGE_RECEIVED
@@ -51,20 +89,4 @@ def get_next_conversation_state(
     ):
         return ConversationState.ASKING_FOR_MORE_INFO
 
-    raise ValueError(
-        f"Invalid event {event.value} for state {current_state.value}"
-    )
-
-
-def classify_interactive_reply(
-    reply: InteractiveReply,
-) -> ConversationEvent:
-    """Classify a WhatsApp interactive reply using its stable ID."""
-
-    if reply.reply_id == "complaint_yes":
-        return ConversationEvent.YES
-
-    if reply.reply_id == "complaint_no":
-        return ConversationEvent.NO
-
-    return ConversationEvent.MESSAGE_RECEIVED
+    raise ValueError(f"Invalid event {event.value} for state {current_state.value}")

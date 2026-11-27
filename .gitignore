@@ -27,6 +27,7 @@ htmlcov/
 
 # Local media storage
 storage/media/
+backend/storage/
 
 # IDE
 .idea/
@@ -39,7 +40,6 @@ Thumbs.db
 # Database backups
 *.dump
 *.sql
-
 
 whatsapp_complaint_system_project_plan.md
 commit_log.csv

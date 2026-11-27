@@ -3,10 +3,11 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from app.db.base import Base
 from sqlalchemy import DateTime, ForeignKey, String, Uuid, func
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
 
 
 class ComplaintStatus(str, Enum):
@@ -15,6 +16,7 @@ class ComplaintStatus(str, Enum):
     UNDER_REVIEW = "UNDER_REVIEW"
     RESOLVED = "RESOLVED"
     REJECTED = "REJECTED"
+    ABANDONED = "ABANDONED"
 
 
 class ConversationState(str, Enum):
@@ -61,6 +63,11 @@ class Complaint(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+    last_activity_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     completed_at: Mapped[datetime | None] = mapped_column(

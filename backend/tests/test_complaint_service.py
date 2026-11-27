@@ -1,19 +1,50 @@
-
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import Settings
 from app.models.complaint import (
     Complaint,
     ComplaintStatus,
     ConversationState,
+)
+from app.models.complaint_message import (
+    ComplaintMessage,
+    MessageType,
 )
 from app.services.complaint_service import (
     get_or_create_active_complaint,
     submit_complaint,
 )
 from app.services.user_service import get_or_create_user
+
+
+def add_complaint_message(
+    db_session,
+    complaint,
+    message_type=MessageType.TEXT,
+    text_content=None,
+    media_id=None,
+    latitude=None,
+    longitude=None,
+):
+    message = ComplaintMessage(
+        complaint_id=complaint.id,
+        whatsapp_message_id=f"test-{uuid.uuid4()}",
+        message_type=message_type,
+        text_content=text_content,
+        media_id=media_id,
+        latitude=latitude,
+        longitude=longitude,
+    )
+
+    db_session.add(message)
+    db_session.flush()
+
+    return message
 
 
 def test_create_new_draft_complaint(db_session):
@@ -35,6 +66,102 @@ def test_existing_active_draft_is_retrieved(db_session):
     second_complaint = get_or_create_active_complaint(db_session, user.id)
 
     assert first_complaint.id == second_complaint.id
+
+
+def test_active_draft_resumes_before_expiry(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    resumed = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=23),
+    )
+
+    assert resumed.id == complaint.id
+    assert resumed.status == ComplaintStatus.DRAFT
+
+
+def test_active_draft_remains_active_just_before_expiry(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    resumed = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=24) - timedelta(microseconds=1),
+    )
+
+    assert resumed.id == complaint.id
+    assert resumed.status == ComplaintStatus.DRAFT
+
+
+def test_active_draft_expires_at_24_hour_boundary(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=24),
+    )
+
+    assert complaint.status == ComplaintStatus.ABANDONED
+    assert replacement.id != complaint.id
+    assert replacement.status == ComplaintStatus.DRAFT
+
+
+def test_draft_without_meaningful_activity_expires_from_creation_time(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = created_at
+    complaint.last_activity_at = None
+    db_session.flush()
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=created_at + timedelta(hours=24),
+    )
+
+    assert complaint.status == ComplaintStatus.ABANDONED
+    assert replacement.id != complaint.id
+
+
+def test_configured_draft_expiry_duration_is_used(db_session, monkeypatch):
+    settings = Settings(_env_file=None, complaint_draft_expiry_hours=6)
+    monkeypatch.setattr(
+        "app.services.complaint_service.get_settings",
+        lambda: settings,
+    )
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    last_activity = datetime(2026, 1, 1, tzinfo=UTC)
+    complaint.created_at = last_activity
+    complaint.last_activity_at = last_activity
+    db_session.flush()
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=last_activity + timedelta(hours=6),
+    )
+
+    assert complaint.status == ComplaintStatus.ABANDONED
+    assert replacement.id != complaint.id
 
 
 def test_different_users_get_separate_complaints(db_session):
@@ -65,6 +192,27 @@ def test_submitted_complaint_is_not_reused(db_session):
     assert second_complaint.conversation_state == ConversationState.AWAITING_COMPLAINT
 
 
+def test_submitted_complaint_is_not_expired(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+    add_complaint_message(
+        db_session,
+        complaint,
+        text_content="Water leakage near my house.",
+    )
+    submit_complaint(db_session, complaint)
+
+    replacement = get_or_create_active_complaint(
+        db_session,
+        user.id,
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+    assert complaint.status == ComplaintStatus.SUBMITTED
+    assert replacement.id != complaint.id
+    assert replacement.status == ComplaintStatus.DRAFT
+
+
 def test_database_rejects_second_draft_for_same_user(db_session):
     user = get_or_create_user(db_session, "919876543210")
 
@@ -93,9 +241,16 @@ def test_database_rejects_second_draft_for_same_user(db_session):
     assert len(drafts) == 1
     assert drafts[0].id == first_complaint.id
 
+
 def test_submit_draft_complaint(db_session):
     user = get_or_create_user(db_session, "919876543210")
     complaint = get_or_create_active_complaint(db_session, user.id)
+
+    add_complaint_message(
+        db_session,
+        complaint,
+        text_content="Street light is not working.",
+    )
 
     submitted_complaint = submit_complaint(db_session, complaint)
 
@@ -106,14 +261,106 @@ def test_submit_draft_complaint(db_session):
     assert submitted_complaint.completed_at.tzinfo is not None
 
 
+def test_cannot_submit_complaint_without_messages(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+
+    with pytest.raises(
+        ValueError,
+        match="without meaningful information",
+    ):
+        submit_complaint(db_session, complaint)
+
+    assert complaint.status == ComplaintStatus.DRAFT
+    assert complaint.complaint_number is None
+    assert complaint.completed_at is None
+
+
+def test_cannot_submit_complaint_with_whitespace_only_text(db_session):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+
+    add_complaint_message(
+        db_session,
+        complaint,
+        text_content="   \n   ",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="without meaningful information",
+    ):
+        submit_complaint(db_session, complaint)
+
+    assert complaint.status == ComplaintStatus.DRAFT
+    assert complaint.complaint_number is None
+
+
 def test_cannot_submit_already_submitted_complaint(db_session):
     user = get_or_create_user(db_session, "919876543210")
     complaint = get_or_create_active_complaint(db_session, user.id)
 
+    add_complaint_message(
+        db_session,
+        complaint,
+        text_content="Water leakage near my house.",
+    )
+
     submit_complaint(db_session, complaint)
     original_reference = complaint.complaint_number
 
-    with pytest.raises(ValueError, match="Only draft complaints can be submitted"):
+    with pytest.raises(
+        ValueError,
+        match="Only draft complaints can be submitted",
+    ):
         submit_complaint(db_session, complaint)
 
     assert complaint.complaint_number == original_reference
+
+
+@pytest.mark.parametrize(
+    (
+        "message_type",
+        "text_content",
+        "media_id",
+        "latitude",
+        "longitude",
+    ),
+    [
+        (MessageType.TEXT, "Water leakage", None, None, None),
+        (MessageType.IMAGE, None, "media-image-123", None, None),
+        (MessageType.AUDIO, None, "media-audio-123", None, None),
+        (
+            MessageType.LOCATION,
+            None,
+            None,
+            17.6599,
+            75.9064,
+        ),
+    ],
+)
+def test_submit_complaint_with_meaningful_message_types(
+    db_session,
+    message_type,
+    text_content,
+    media_id,
+    latitude,
+    longitude,
+):
+    user = get_or_create_user(db_session, "919876543210")
+    complaint = get_or_create_active_complaint(db_session, user.id)
+
+    add_complaint_message(
+        db_session,
+        complaint,
+        message_type=message_type,
+        text_content=text_content,
+        media_id=media_id,
+        latitude=latitude,
+        longitude=longitude,
+    )
+
+    submitted_complaint = submit_complaint(db_session, complaint)
+
+    assert submitted_complaint.status == ComplaintStatus.SUBMITTED
+    assert submitted_complaint.complaint_number.startswith("CMP-")

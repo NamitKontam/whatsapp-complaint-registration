@@ -1,17 +1,20 @@
-
 import hashlib
 import hmac
 import json
 import secrets
 
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
+from sqlalchemy.orm import Session
+
 from app.core.config import get_settings
+from app.db.session import get_db
+from app.services.whatsapp_inbox_service import persist_webhook_events
 from app.services.whatsapp_payload_service import (
     ParsedWebhookPayload,
     PayloadValidationError,
     parse_webhook_payload,
 )
-from fastapi import APIRouter, Body, Header, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
 
 router = APIRouter()
 
@@ -19,12 +22,8 @@ router = APIRouter()
 @router.get("/whatsapp", response_class=PlainTextResponse)
 def verify_whatsapp_webhook(
     hub_mode: str | None = Query(default=None, alias="hub.mode"),
-    hub_verify_token: str | None = Query(
-        default=None, alias="hub.verify_token"
-    ),
-    hub_challenge: str | None = Query(
-        default=None, alias="hub.challenge"
-    ),
+    hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
 ):
     settings = get_settings()
 
@@ -49,6 +48,7 @@ def verify_whatsapp_webhook(
 @router.post("/whatsapp")
 async def receive_whatsapp_webhook(
     request: Request,
+    db: Session = Depends(get_db),  # noqa: B008
     x_hub_signature_256: str | None = Header(default=None),
 ):
     settings = get_settings()
@@ -69,11 +69,14 @@ async def receive_whatsapp_webhook(
     body = await request.body()
 
     # Calculate the expected Meta signature.
-    expected_signature = "sha256=" + hmac.new(
-        settings.meta_app_secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected_signature = (
+        "sha256="
+        + hmac.new(
+            settings.meta_app_secret.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     # Compare signatures safely.
     if not hmac.compare_digest(
@@ -100,33 +103,25 @@ async def receive_whatsapp_webhook(
             detail="Invalid webhook payload",
         )
 
-    # Temporary inspection: identify message types without logging
-    # phone numbers or message contents.
-    message_types = []
+        # Normalize the verified Meta payload.
+    try:
+        parsed_payload = parse_webhook_payload(payload)
+    except PayloadValidationError as err:
+        raise HTTPException(
+            status_code=400,
+            detail=str(err),
+        ) from err
 
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
+    accepted_events = persist_webhook_events(
+        db=db,
+        parsed_payload=parsed_payload,
+    )
 
-            for status in value.get("statuses", []):
-                print(
-                    "WhatsApp message status:",
-                    status.get("status"),
-                    "Message ID:",
-                    status.get("id"),
-                    "Recipient:",
-                    status.get("recipient_id"),
-                    "Errors:",
-                    status.get("errors"),
-                )
-
-            for message in value.get("messages", []):
-                message_types.append(message.get("type", "unknown"))
-
-    print(f"WhatsApp webhook received. Message types: {message_types}")
-
-    # Acknowledge receipt to Meta.
-    return {"status": "received"}
+    # Acknowledge only after all normalized events have been durably enqueued.
+    return {
+        "status": "received",
+        "accepted_events": accepted_events,
+    }
 
 
 # ==============================================================================
@@ -141,7 +136,7 @@ async def receive_whatsapp_webhook(
     description="Test endpoint for Swagger: parses any WhatsApp webhook payload using the Pydantic parser and returns normalized messages and status receipts.",
 )
 def test_parse_whatsapp_payload(
-    payload: dict = Body(
+    payload: dict = Body(  # noqa: B008
         ...,
         openapi_examples={
             "Text Message": {
