@@ -1,4 +1,3 @@
-
 import hashlib
 import hmac
 import json
@@ -6,21 +5,11 @@ import secrets
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.outbound_whatsapp_message import (
-    OutboundMessageStatus,
-    OutboundWhatsAppMessage,
-)
-from app.services.complaint_processing_service import (
-    process_incoming_message,
-)
-from app.services.whatsapp_outbox_service import (
-    dispatch_outbound_message,
-)
+from app.services.whatsapp_inbox_service import persist_webhook_events
 from app.services.whatsapp_payload_service import (
     ParsedWebhookPayload,
     PayloadValidationError,
@@ -33,12 +22,8 @@ router = APIRouter()
 @router.get("/whatsapp", response_class=PlainTextResponse)
 def verify_whatsapp_webhook(
     hub_mode: str | None = Query(default=None, alias="hub.mode"),
-    hub_verify_token: str | None = Query(
-        default=None, alias="hub.verify_token"
-    ),
-    hub_challenge: str | None = Query(
-        default=None, alias="hub.challenge"
-    ),
+    hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
 ):
     settings = get_settings()
 
@@ -84,11 +69,14 @@ async def receive_whatsapp_webhook(
     body = await request.body()
 
     # Calculate the expected Meta signature.
-    expected_signature = "sha256=" + hmac.new(
-        settings.meta_app_secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected_signature = (
+        "sha256="
+        + hmac.new(
+            settings.meta_app_secret.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     # Compare signatures safely.
     if not hmac.compare_digest(
@@ -124,48 +112,15 @@ async def receive_whatsapp_webhook(
             detail=str(err),
         ) from err
 
-    # Process incoming messages.
-    # Status events are acknowledged but do not create complaints.
-    processed_messages = 0
+    accepted_events = persist_webhook_events(
+        db=db,
+        parsed_payload=parsed_payload,
+    )
 
-    
-    for message in parsed_payload.messages:
-        result = process_incoming_message(
-            db=db,
-            message=message,
-        )
-        processed_messages += 1
-
-        # Find the outbox row associated with this inbound message.
-        # This also works for duplicate webhook deliveries.
-        outbound_message = db.scalar(
-            select(OutboundWhatsAppMessage).where(
-                OutboundWhatsAppMessage.inbound_message_id
-                == result.message.id
-            )
-        )
-
-        if outbound_message is None:
-            continue
-
-        if outbound_message.status not in {
-            OutboundMessageStatus.PENDING,
-            OutboundMessageStatus.FAILED,
-        }:
-            continue
-
-        # Complaint processing has already committed.
-        # Sending failure must not undo complaint registration.
-        await dispatch_outbound_message(
-            db=db,
-            outbound_message_id=outbound_message.id,
-        )
-
-
-    # Acknowledge receipt to Meta.
+    # Acknowledge only after all normalized events have been durably enqueued.
     return {
         "status": "received",
-        "processed_messages": processed_messages,
+        "accepted_events": accepted_events,
     }
 
 

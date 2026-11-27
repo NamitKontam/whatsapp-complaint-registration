@@ -1,8 +1,9 @@
-
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.models.complaint import Complaint, ComplaintStatus, ConversationState
@@ -11,6 +12,7 @@ from app.models.outbound_whatsapp_message import (
     OutboundMessageStatus,
     OutboundWhatsAppMessage,
 )
+from app.models.unsupported_whatsapp_message import UnsupportedWhatsAppMessage
 from app.models.user import User
 from app.schemas.whatsapp_message import (
     IncomingWhatsAppMessage,
@@ -18,6 +20,7 @@ from app.schemas.whatsapp_message import (
 )
 from app.services.complaint_message_service import save_complaint_message
 from app.services.complaint_service import (
+    get_active_complaint,
     get_or_create_active_complaint,
     submit_complaint,
 )
@@ -26,19 +29,32 @@ from app.services.conversation_service import (
     classify_interactive_reply,
     classify_reply,
     get_next_conversation_state,
+    is_ambiguous_short_reply,
+    is_greeting_reply,
 )
 from app.services.user_service import get_or_create_user
+from app.services.whatsapp_inbox_service import lock_inbound_event_claim
+from app.services.whatsapp_media_service import (
+    WhatsAppMediaDownload,
+    WhatsAppMediaDownloadError,
+    download_whatsapp_media,
+    remove_stored_whatsapp_media,
+)
 
 
 @dataclass(frozen=True)
 class ComplaintProcessingResult:
     user: User
-    complaint: Complaint
-    message: ComplaintMessage
+    complaint: Complaint | None
+    message: ComplaintMessage | None
     event: ConversationEvent | None
     is_duplicate: bool
     submitted: bool
     needs_more_information: bool
+    is_greeting: bool = False
+    is_unsupported: bool = False
+    is_ambiguous_reply: bool = False
+    unsupported_inbound_message_id: uuid.UUID | None = None
 
 
 def _map_message_type(message_type: MessageKind) -> MessageType:
@@ -52,22 +68,20 @@ def _map_message_type(message_type: MessageKind) -> MessageType:
     }
     return mapping[message_type]
 
+
 def _get_locked_user(
     db: Session,
     whatsapp_number: str,
 ) -> User:
     user = get_or_create_user(db, whatsapp_number)
 
-    locked_user = db.scalar(
-        select(User)
-        .where(User.id == user.id)
-        .with_for_update()
-    )
+    locked_user = db.scalar(select(User).where(User.id == user.id).with_for_update())
 
     if locked_user is None:
         raise RuntimeError("Unable to retrieve and lock user")
 
     return locked_user
+
 
 def _get_existing_message(
     db: Session,
@@ -75,10 +89,21 @@ def _get_existing_message(
 ) -> ComplaintMessage | None:
     return db.scalar(
         select(ComplaintMessage).where(
-            ComplaintMessage.whatsapp_message_id
-            == whatsapp_message_id
+            ComplaintMessage.whatsapp_message_id == whatsapp_message_id
         )
     )
+
+
+def _get_existing_unsupported_message(
+    db: Session,
+    whatsapp_message_id: str,
+) -> UnsupportedWhatsAppMessage | None:
+    return db.scalar(
+        select(UnsupportedWhatsAppMessage).where(
+            UnsupportedWhatsAppMessage.whatsapp_message_id == whatsapp_message_id
+        )
+    )
+
 
 def _validate_duplicate_message_owner(
     db: Session,
@@ -88,20 +113,57 @@ def _validate_duplicate_message_owner(
     complaint = db.get(Complaint, existing_message.complaint_id)
 
     if complaint is None:
-        raise RuntimeError(
-            "Existing message references a missing complaint"
-        )
+        raise RuntimeError("Existing message references a missing complaint")
 
     if complaint.user_id != user_id:
-        raise ValueError(
-            "WhatsApp message is already associated with another user"
+        raise ValueError("WhatsApp message is already associated with another user")
+
+
+def _save_unlinked_unsupported_message(
+    db: Session,
+    user: User,
+    message: IncomingWhatsAppMessage,
+) -> tuple[UnsupportedWhatsAppMessage, bool]:
+    statement = (
+        insert(UnsupportedWhatsAppMessage)
+        .values(
+            user_id=user.id,
+            whatsapp_message_id=message.whatsapp_message_id,
+            raw_type=message.raw_type,
         )
-    
+        .on_conflict_do_nothing(
+            index_elements=[UnsupportedWhatsAppMessage.whatsapp_message_id]
+        )
+        .returning(UnsupportedWhatsAppMessage)
+    )
+    saved_message = db.scalars(statement).one_or_none()
+
+    if saved_message is not None:
+        return saved_message, True
+
+    existing_message = _get_existing_unsupported_message(
+        db,
+        message.whatsapp_message_id,
+    )
+    if existing_message is None:
+        raise RuntimeError("Unable to save or retrieve unsupported WhatsApp message")
+    if existing_message.user_id != user.id:
+        raise ValueError("WhatsApp message is already associated with another user")
+
+    return existing_message, False
+
+
 def _classify_message_event(
     message: IncomingWhatsAppMessage,
+    conversation_state: ConversationState | None = None,
 ) -> ConversationEvent:
     if message.message_type == MessageKind.TEXT:
-        return classify_reply(message.text_content or "")
+        return classify_reply(
+            message.text_content or "",
+            allow_common_variants=(
+                conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+            ),
+        )
 
     if (
         message.message_type == MessageKind.INTERACTIVE
@@ -111,10 +173,14 @@ def _classify_message_event(
 
     return ConversationEvent.MESSAGE_RECEIVED
 
+
 def _save_incoming_message(
     db: Session,
     complaint: Complaint,
     message: IncomingWhatsAppMessage,
+    is_greeting: bool = False,
+    media_storage_key: str | None = None,
+    message_type_override: MessageType | None = None,
 ) -> tuple[ComplaintMessage, bool]:
     interactive_reply = message.interactive_reply
 
@@ -122,10 +188,11 @@ def _save_incoming_message(
         db=db,
         complaint_id=complaint.id,
         whatsapp_message_id=message.whatsapp_message_id,
-        message_type=_map_message_type(message.message_type),
-        text_content=message.text_content,
+        message_type=message_type_override or _map_message_type(message.message_type),
+        text_content=(None if is_greeting else message.text_content),
         media_id=message.media_id,
         media_mime_type=message.media_mime_type,
+        media_storage_key=media_storage_key,
         caption=message.caption,
         latitude=message.latitude,
         longitude=message.longitude,
@@ -137,17 +204,14 @@ def _save_incoming_message(
             else None
         ),
         interactive_reply_id=(
-            interactive_reply.reply_id
-            if interactive_reply is not None
-            else None
+            interactive_reply.reply_id if interactive_reply is not None else None
         ),
         interactive_reply_title=(
-            interactive_reply.title
-            if interactive_reply is not None
-            else None
+            interactive_reply.title if interactive_reply is not None else None
         ),
         raw_type=message.raw_type,
     )
+
 
 def _build_duplicate_result(
     db: Session,
@@ -157,14 +221,10 @@ def _build_duplicate_result(
     complaint = db.get(Complaint, existing_message.complaint_id)
 
     if complaint is None:
-        raise RuntimeError(
-            "Existing message references a missing complaint"
-        )
+        raise RuntimeError("Existing message references a missing complaint")
 
     if complaint.user_id != user.id:
-        raise ValueError(
-            "WhatsApp message is already associated with another user"
-        )
+        raise ValueError("WhatsApp message is already associated with another user")
 
     return ComplaintProcessingResult(
         user=user,
@@ -176,11 +236,61 @@ def _build_duplicate_result(
         needs_more_information=False,
     )
 
+
+def _build_duplicate_unsupported_result(
+    existing_message: UnsupportedWhatsAppMessage,
+    user: User,
+) -> ComplaintProcessingResult:
+    if existing_message.user_id != user.id:
+        raise ValueError("WhatsApp message is already associated with another user")
+
+    return ComplaintProcessingResult(
+        user=user,
+        complaint=None,
+        message=None,
+        event=None,
+        is_duplicate=True,
+        submitted=False,
+        needs_more_information=False,
+        is_unsupported=True,
+        unsupported_inbound_message_id=existing_message.id,
+    )
+
+
 def _get_active_complaint(
     db: Session,
     user: User,
-) -> Complaint:
-    return get_or_create_active_complaint(db, user.id)
+    now: datetime,
+    *,
+    create: bool,
+) -> Complaint | None:
+    if create:
+        return get_or_create_active_complaint(db, user.id, now=now)
+    return get_active_complaint(db, user.id, now=now)
+
+
+def _is_meaningful_message(
+    message: IncomingWhatsAppMessage,
+    event: ConversationEvent | None,
+    is_greeting: bool,
+    is_ambiguous_reply: bool,
+) -> bool:
+    if is_greeting or is_ambiguous_reply:
+        return False
+
+    if message.message_type == MessageKind.TEXT:
+        return bool((message.text_content or "").strip()) and (
+            event == ConversationEvent.MESSAGE_RECEIVED
+        )
+
+    if message.message_type in {MessageKind.IMAGE, MessageKind.AUDIO}:
+        return message.media_id is not None
+
+    if message.message_type == MessageKind.LOCATION:
+        return message.latitude is not None and message.longitude is not None
+
+    return False
+
 
 def _update_conversation_state(
     complaint: Complaint,
@@ -191,6 +301,7 @@ def _update_conversation_state(
         event,
     )
 
+
 def _try_submit_complaint(
     db: Session,
     complaint: Complaint,
@@ -198,12 +309,8 @@ def _try_submit_complaint(
     try:
         submit_complaint(db, complaint)
     except ValueError as exc:
-        if str(exc) == (
-            "Cannot submit a complaint without meaningful information"
-        ):
-            complaint.conversation_state = (
-                ConversationState.ASKING_FOR_MORE_INFO
-            )
+        if str(exc) == ("Cannot submit a complaint without meaningful information"):
+            complaint.conversation_state = ConversationState.ASKING_FOR_MORE_INFO
             return False
 
         raise
@@ -219,33 +326,91 @@ def _enqueue_outbound_reply(
     # Import locally to avoid a circular import:
     # whatsapp_reply_service imports ComplaintProcessingResult.
     from app.services.whatsapp_reply_service import (
+        InteractiveWhatsAppReply,
         get_whatsapp_reply,
     )
 
-    reply_text = get_whatsapp_reply(result)
+    reply = get_whatsapp_reply(result)
 
     # Duplicate messages and other no-reply cases are not queued.
-    if reply_text is None:
+    if reply is None:
         return
 
+    if isinstance(reply, InteractiveWhatsAppReply):
+        body = reply.body
+        interactive_buttons = [dict(button) for button in reply.buttons]
+    else:
+        body = reply
+        interactive_buttons = None
+
+    if result.message is None and result.unsupported_inbound_message_id is None:
+        raise RuntimeError("Outbound reply has no associated inbound message")
+
     outbound_message = OutboundWhatsAppMessage(
-        inbound_message_id=result.message.id,
-        complaint_id=result.complaint.id,
+        inbound_message_id=result.message.id if result.message is not None else None,
+        unsupported_inbound_message_id=result.unsupported_inbound_message_id,
+        complaint_id=result.complaint.id if result.complaint is not None else None,
         recipient=recipient,
-        body=reply_text,
+        body=body,
+        interactive_buttons=interactive_buttons,
         status=OutboundMessageStatus.PENDING,
     )
 
     db.add(outbound_message)
 
 
-
-def process_incoming_message(
+async def process_incoming_message(
     db: Session,
     message: IncomingWhatsAppMessage,
+    *,
+    now: datetime | None = None,
+    inbox_event_id: uuid.UUID | None = None,
+    worker_id: str | None = None,
 ) -> ComplaintProcessingResult:
+    downloaded_media: WhatsAppMediaDownload | None = None
+    processing_time = now or datetime.now(UTC)
+    if processing_time.tzinfo is None or processing_time.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+    processing_time = processing_time.astimezone(UTC)
+    if (inbox_event_id is None) != (worker_id is None):
+        raise ValueError("inbox_event_id and worker_id must be provided together")
+
     try:
+        if message.message_type in {MessageKind.IMAGE, MessageKind.AUDIO}:
+            if inbox_event_id is not None and worker_id is not None:
+                lock_inbound_event_claim(
+                    db,
+                    event_id=inbox_event_id,
+                    worker_id=worker_id,
+                )
+
+            existing_message = _get_existing_message(
+                db=db,
+                whatsapp_message_id=message.whatsapp_message_id,
+            )
+            existing_unsupported_message = _get_existing_unsupported_message(
+                db=db,
+                whatsapp_message_id=message.whatsapp_message_id,
+            )
+            db.commit()
+
+            if existing_message is None and existing_unsupported_message is None:
+                if message.media_id is None:
+                    raise ValueError("Media messages require a WhatsApp media ID")
+
+                downloaded_media = await download_whatsapp_media(
+                    message.media_id,
+                    expected_mime_type=message.media_mime_type,
+                )
+
         # 1. Get or create the user and lock their row.
+        if inbox_event_id is not None and worker_id is not None:
+            lock_inbound_event_claim(
+                db,
+                event_id=inbox_event_id,
+                worker_id=worker_id,
+            )
+
         user = _get_locked_user(
             db=db,
             whatsapp_number=message.whatsapp_number,
@@ -269,63 +434,140 @@ def process_incoming_message(
             db.commit()
 
             return result
-        
+
+        existing_unsupported_message = _get_existing_unsupported_message(
+            db=db,
+            whatsapp_message_id=message.whatsapp_message_id,
+        )
+        if existing_unsupported_message is not None:
+            result = _build_duplicate_unsupported_result(
+                existing_message=existing_unsupported_message,
+                user=user,
+            )
+            db.commit()
+            return result
+
+        is_unsupported = message.message_type == MessageKind.UNSUPPORTED
 
         # 4. Get or create the user's active complaint.
         complaint = _get_active_complaint(
             db=db,
             user=user,
+            now=processing_time,
+            create=not is_unsupported,
         )
+
+        if complaint is None and not is_unsupported:
+            raise RuntimeError("Expected an active complaint for a supported message")
 
         # 5. Classify the incoming message.
-        event = _classify_message_event(message)
-
-        # 6. Save the incoming message and its metadata.
-        saved_message, is_new = _save_incoming_message(
-            db=db,
-            complaint=complaint,
-            message=message,
+        event = (
+            None
+            if is_unsupported
+            else _classify_message_event(
+                message,
+                complaint.conversation_state if complaint is not None else None,
+            )
+        )
+        is_greeting = message.message_type == MessageKind.TEXT and is_greeting_reply(
+            message.text_content or ""
+        )
+        is_ambiguous_reply = (
+            complaint is not None
+            and complaint.conversation_state == ConversationState.ASKING_FOR_MORE_INFO
+            and message.message_type == MessageKind.TEXT
+            and is_ambiguous_short_reply(message.text_content or "")
+        )
+        is_meaningful = _is_meaningful_message(
+            message,
+            event,
+            is_greeting,
+            is_ambiguous_reply,
         )
 
-        # 7. Handle a duplicate detected during message insertion.
-        if not is_new:
-            _validate_duplicate_message_owner(
+        # 7. Save the incoming message and its metadata.
+        unsupported_inbound_message_id = None
+        if is_unsupported and complaint is None:
+            unsupported_message, is_new = _save_unlinked_unsupported_message(
                 db=db,
-                existing_message=saved_message,
-                user_id=user.id,
+                user=user,
+                message=message,
+            )
+            unsupported_inbound_message_id = unsupported_message.id
+            saved_message = None
+        else:
+            if complaint is None:
+                raise RuntimeError("Complaint is required to save this message")
+            saved_message, is_new = _save_incoming_message(
+                db=db,
+                complaint=complaint,
+                message=message,
+                is_greeting=is_greeting,
+                media_storage_key=(
+                    downloaded_media.storage_key
+                    if downloaded_media is not None
+                    else None
+                ),
+                message_type_override=(
+                    MessageType.OTHER if is_ambiguous_reply else None
+                ),
             )
 
-            result = _build_duplicate_result(
-                db=db,
-                existing_message=saved_message,
-                user=user,
-            )
+        # 8. Handle a duplicate detected during message insertion.
+        if not is_new:
+            if downloaded_media is not None:
+                remove_stored_whatsapp_media(downloaded_media.storage_key)
+                downloaded_media = None
+
+            if is_unsupported and complaint is None:
+                if unsupported_inbound_message_id is None:
+                    raise RuntimeError("Missing unsupported message identifier")
+                result = _build_duplicate_unsupported_result(
+                    existing_message=unsupported_message,
+                    user=user,
+                )
+            else:
+                if saved_message is None:
+                    raise RuntimeError("Missing saved complaint message")
+                _validate_duplicate_message_owner(
+                    db=db,
+                    existing_message=saved_message,
+                    user_id=user.id,
+                )
+                result = _build_duplicate_result(
+                    db=db,
+                    existing_message=saved_message,
+                    user=user,
+                )
 
             db.commit()
             return result
 
-        
-        # 8. Handle submission before changing the state to COMPLETED.
+        if is_meaningful and complaint is not None:
+            complaint.last_activity_at = processing_time
+
+        # 9. Handle submission before changing the state to COMPLETED.
         submitted = False
         needs_more_information = False
 
-        if event == ConversationEvent.NO:
-            submitted = _try_submit_complaint(
-                db=db,
-                complaint=complaint,
-            )
+        if not is_greeting and not is_unsupported and not is_ambiguous_reply:
+            if event == ConversationEvent.NO:
+                if complaint is None:
+                    raise RuntimeError("Complaint is required to process submission")
+                submitted = _try_submit_complaint(
+                    db=db,
+                    complaint=complaint,
+                )
 
-            needs_more_information = not submitted
-        else:
-            # Ordinary messages and YES replies update the state here.
-            _update_conversation_state(
-                complaint=complaint,
-                event=event,
-            )
+                needs_more_information = not submitted
+            else:
+                # Ordinary messages and YES replies update the state here.
+                _update_conversation_state(
+                    complaint=complaint,
+                    event=event,
+                )
 
-
-
-        # 9. Build the processing result.
+        # 10. Build the processing result.
         result = ComplaintProcessingResult(
             user=user,
             complaint=complaint,
@@ -334,22 +576,33 @@ def process_incoming_message(
             is_duplicate=False,
             submitted=submitted,
             needs_more_information=needs_more_information,
+            is_greeting=is_greeting,
+            is_unsupported=is_unsupported,
+            is_ambiguous_reply=is_ambiguous_reply,
+            unsupported_inbound_message_id=unsupported_inbound_message_id,
         )
 
-        # 10. Queue the reply in the same transaction.
+        # 11. Queue the reply in the same transaction.
         _enqueue_outbound_reply(
             db=db,
             result=result,
             recipient=message.whatsapp_number,
         )
 
-        # 11. Commit the complaint, inbound message, and outbox together.
+        # 12. Commit the complaint, inbound message, and outbox together.
         db.commit()
+        downloaded_media = None
 
         return result
 
-
-
-    except Exception:
+    except Exception as processing_error:
         db.rollback()
+        if downloaded_media is not None:
+            try:
+                remove_stored_whatsapp_media(downloaded_media.storage_key)
+            except WhatsAppMediaDownloadError as cleanup_error:
+                raise ExceptionGroup(
+                    "Complaint processing and downloaded media cleanup failed",
+                    [processing_error, cleanup_error],
+                ) from None
         raise

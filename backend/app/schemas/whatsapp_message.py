@@ -1,4 +1,3 @@
-
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
@@ -79,7 +78,9 @@ class IncomingWhatsAppMessage(BaseModel):
         cls,
         value: Decimal | None,
     ) -> Decimal | None:
-        if value is not None and not Decimal(-90) <= value <= Decimal(90):
+        if value is not None and (
+            not value.is_finite() or not Decimal(-90) <= value <= Decimal(90)
+        ):
             raise ValueError("Latitude must be between -90 and 90")
 
         return value
@@ -90,7 +91,9 @@ class IncomingWhatsAppMessage(BaseModel):
         cls,
         value: Decimal | None,
     ) -> Decimal | None:
-        if value is not None and not Decimal(-180) <= value <= Decimal(180):
+        if value is not None and (
+            not value.is_finite() or not Decimal(-180) <= value <= Decimal(180)
+        ):
             raise ValueError("Longitude must be between -180 and 180")
 
         return value
@@ -110,17 +113,13 @@ class IncomingWhatsAppMessage(BaseModel):
 
         elif self.message_type == MessageKind.LOCATION:
             if self.latitude is None or self.longitude is None:
-                raise ValueError(
-                    "Location messages require latitude and longitude"
-                )
+                raise ValueError("Location messages require latitude and longitude")
 
         elif (
             self.message_type == MessageKind.INTERACTIVE
             and self.interactive_reply is None
         ):
-            raise ValueError(
-                "Interactive messages require interactive_reply"
-            )
+            raise ValueError("Interactive messages require interactive_reply")
 
         return self
 

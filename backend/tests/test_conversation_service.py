@@ -1,4 +1,3 @@
-
 import pytest
 
 from app.models.complaint import ConversationState
@@ -23,12 +22,42 @@ from app.services.conversation_service import (
         ("No", ConversationEvent.NO),
         ("no", ConversationEvent.NO),
         ("N", ConversationEvent.NO),
+        ("hi", ConversationEvent.MESSAGE_RECEIVED),
+        ("Hello!", ConversationEvent.MESSAGE_RECEIVED),
+        (" hey ", ConversationEvent.MESSAGE_RECEIVED),
         ("No water supply", ConversationEvent.MESSAGE_RECEIVED),
         ("Yesterday there was leakage", ConversationEvent.MESSAGE_RECEIVED),
     ],
 )
 def test_classify_reply(reply, expected_event):
     assert classify_reply(reply) == expected_event
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected_event"),
+    [
+        (" Yeah! ", ConversationEvent.YES),
+        ("yep", ConversationEvent.YES),
+        ("sure.", ConversationEvent.YES),
+        ("nope", ConversationEvent.NO),
+        ("ok", ConversationEvent.MESSAGE_RECEIVED),
+        ("OK", ConversationEvent.MESSAGE_RECEIVED),
+        ("Okay", ConversationEvent.MESSAGE_RECEIVED),
+        ("okay!", ConversationEvent.MESSAGE_RECEIVED),
+    ],
+)
+def test_classify_common_variants_when_asked_for_more_info(reply, expected_event):
+    assert classify_reply(reply, allow_common_variants=True) == expected_event
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["maybe", "Not sure!", " unsure ", "ok", "OK", "Okay", "okay"],
+)
+def test_identify_ambiguous_short_replies(reply):
+    from app.services.conversation_service import is_ambiguous_short_reply
+
+    assert is_ambiguous_short_reply(reply)
 
 
 @pytest.mark.parametrize(
@@ -78,11 +107,12 @@ def test_invalid_transition_raises_error():
             ConversationEvent.NO,
         )
 
+
 @pytest.mark.parametrize(
     ("reply_id", "expected_event"),
     [
-        ("complaint_yes", ConversationEvent.YES),
-        ("complaint_no", ConversationEvent.NO),
+        ("complaint_add_more", ConversationEvent.YES),
+        ("complaint_submit", ConversationEvent.NO),
         ("unknown_option", ConversationEvent.MESSAGE_RECEIVED),
     ],
 )

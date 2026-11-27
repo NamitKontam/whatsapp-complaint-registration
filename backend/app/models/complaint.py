@@ -16,6 +16,7 @@ class ComplaintStatus(str, Enum):
     UNDER_REVIEW = "UNDER_REVIEW"
     RESOLVED = "RESOLVED"
     REJECTED = "REJECTED"
+    ABANDONED = "ABANDONED"
 
 
 class ConversationState(str, Enum):
@@ -62,6 +63,11 @@ class Complaint(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+    last_activity_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     completed_at: Mapped[datetime | None] = mapped_column(

@@ -565,6 +565,8 @@ def test_naive_timestamp_string_rejected():
     [
         (Decimal("95.0"), Decimal("77.0"), "Latitude must be between -90 and 90"),
         (Decimal("-95.0"), Decimal("77.0"), "Latitude must be between -90 and 90"),
+        (Decimal("NaN"), Decimal("77.0"), "finite number"),
+        (Decimal("12.0"), Decimal("Infinity"), "finite number"),
         (Decimal("12.0"), Decimal("185.0"), "Longitude must be between -180 and 180"),
         (Decimal("12.0"), Decimal("-185.0"), "Longitude must be between -180 and 180"),
     ],
@@ -686,7 +688,6 @@ def test_extract_messages_omits_unsupported_when_requested():
 # ==========================================
 # 14. Webhook Route Integration Test
 # ==========================================
-
 
 
 def test_test_parser_endpoint_integration():

@@ -1,9 +1,10 @@
-
 import uuid
 from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
+    JSON,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -20,12 +21,23 @@ from app.db.base import Base
 
 class OutboundMessageStatus(str, Enum):
     PENDING = "PENDING"
+    RETRY_SCHEDULED = "RETRY_SCHEDULED"
     SENT = "SENT"
     FAILED = "FAILED"
+    UNCERTAIN = "UNCERTAIN"
 
 
 class OutboundWhatsAppMessage(Base):
     __tablename__ = "outbound_whatsapp_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "(inbound_message_id IS NOT NULL AND "
+            "unsupported_inbound_message_id IS NULL) OR "
+            "(inbound_message_id IS NULL AND "
+            "unsupported_inbound_message_id IS NOT NULL)",
+            name="ck_outbox_one_inbound_source",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -33,16 +45,23 @@ class OutboundWhatsAppMessage(Base):
         default=uuid.uuid4,
     )
 
-    inbound_message_id: Mapped[uuid.UUID] = mapped_column(
+    inbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("complaint_messages.id"),
         unique=True,
-        nullable=False,
+        nullable=True,
         index=True,
     )
 
-    complaint_id: Mapped[uuid.UUID] = mapped_column(
+    unsupported_inbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("unsupported_whatsapp_messages.id"),
+        unique=True,
+        nullable=True,
+        index=True,
+    )
+
+    complaint_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("complaints.id"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
 
@@ -54,6 +73,11 @@ class OutboundWhatsAppMessage(Base):
     body: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+    )
+
+    interactive_buttons: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JSON,
+        nullable=True,
     )
 
     status: Mapped[OutboundMessageStatus] = mapped_column(
@@ -76,9 +100,29 @@ class OutboundWhatsAppMessage(Base):
         nullable=True,
     )
 
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     whatsapp_message_id: Mapped[str | None] = mapped_column(
         String(255),
         unique=True,
+        nullable=True,
+    )
+
+    provider_status: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    provider_status_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
     )
 
@@ -95,3 +139,4 @@ class OutboundWhatsAppMessage(Base):
 
     inbound_message = relationship("ComplaintMessage")
     complaint = relationship("Complaint")
+    unsupported_inbound_message = relationship("UnsupportedWhatsAppMessage")
